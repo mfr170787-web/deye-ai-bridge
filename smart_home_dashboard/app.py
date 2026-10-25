@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 
 
 def options():
@@ -74,13 +74,23 @@ def layout():
     try:
         value = json.loads(LAYOUT_FILE.read_text())
         if isinstance(value.get("widgets"), list):
+            widgets = value["widgets"]
+            price = next((row for row in widgets if row.get("type") == "price"), None)
+            solar = next((row for row in widgets if row.get("type") == "solar"), None)
+            if solar:
+                if not price:
+                    solar["type"] = "price"
+                    solar["title"] = "Elpris og solprognose"
+                else:
+                    value["widgets"] = [row for row in widgets if row.get("type") != "solar"]
+                    price["title"] = "Elpris og solprognose"
+                LAYOUT_FILE.write_text(json.dumps(value, ensure_ascii=False, indent=2))
             return value
     except (FileNotFoundError, json.JSONDecodeError, AttributeError):
         pass
     return {"widgets": [
         {"id": "energy", "type": "energy", "size": "wide", "title": "Energiflow"},
-        {"id": "price", "type": "price", "size": "normal", "title": "Elpris"},
-        {"id": "solar", "type": "solar", "size": "normal", "title": "Solprognose"},
+        {"id": "price", "type": "price", "size": "normal", "title": "Elpris og solprognose"},
         {"id": "clock", "type": "clock", "size": "normal", "title": "Tid"},
     ]}
 
