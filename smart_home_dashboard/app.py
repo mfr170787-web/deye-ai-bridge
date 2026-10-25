@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 
 
 def options():
@@ -110,7 +110,7 @@ def save_layout(data):
         item = {"id": str(row.get("id") or "w%d" % number)[:80], "type": row["type"],
                 "entity_id": entity_id, "title": str(row.get("title", ""))[:100],
                 "size": "wide" if row.get("size") == "wide" else "normal",
-                "height": row.get("height") if row.get("height") in {"normal", "medium", "tall"} else "normal"}
+                "height": row.get("height") if row.get("height") in {"half", "normal", "medium", "tall"} else "normal"}
         if row["type"] in {"cover_group", "group"}:
             item["type"] = "group"
             item["entity_ids"] = [str(x) for x in row.get("entity_ids", [])[:20]
