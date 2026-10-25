@@ -30,7 +30,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.5.5"
+APP_VERSION = "0.6.0"
 
 REGISTER_MAP = {
     117: ("Minimum batteri-SOC", "%", 1, False),
@@ -170,6 +170,8 @@ def energy_plan():
         "evening_start": "16:00", "max_charge_w": 8000,
         "max_export_w": 0, "allow_battery_sale": False,
         "main_fuse_ampere": 35, "automatic_control": False,
+        "battery_capacity_kwh": 32.0, "max_discharge_w": 8000,
+        "roundtrip_efficiency_percent": 90,
     }
     try:
         defaults.update(json.loads(PLAN_FILE.read_text()))
@@ -186,6 +188,9 @@ def save_energy_plan(data):
     plan["minimum_soc_morning"] = max(10, min(100, int(plan["minimum_soc_morning"])))
     plan["max_charge_w"] = max(0, min(12000, int(plan["max_charge_w"])))
     plan["max_export_w"] = max(0, min(12000, int(plan["max_export_w"])))
+    plan["battery_capacity_kwh"] = max(5, min(100, float(plan["battery_capacity_kwh"])))
+    plan["max_discharge_w"] = max(0, min(12000, int(plan["max_discharge_w"])))
+    plan["roundtrip_efficiency_percent"] = max(70, min(100, int(plan["roundtrip_efficiency_percent"])))
     plan["main_fuse_ampere"] = 35
     plan["automatic_control"] = False
     PLAN_FILE.write_text(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -420,6 +425,105 @@ def dashboard_market(sample=None):
                             "performance_percent": options().get("solar_performance_percent", 85)}}
 
 
+def hourly_load_profile():
+    """Learn a conservative hourly house-load profile from local samples."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=21)).isoformat()
+    buckets = {hour: [] for hour in range(24)}
+    with db() as conn:
+        rows = conn.execute("SELECT created,load_w FROM samples WHERE created>=? AND load_w IS NOT NULL", (cutoff,)).fetchall()
+    local_tz = ZoneInfo("Europe/Copenhagen")
+    all_values = []
+    for row in rows:
+        try:
+            value = max(0.0, float(row["load_w"]))
+            hour = datetime.fromisoformat(row["created"]).astimezone(local_tz).hour
+            buckets[hour].append(value)
+            all_values.append(value)
+        except (TypeError, ValueError):
+            continue
+    fallback = sum(all_values) / len(all_values) if all_values else 1200.0
+    profile = {hour: round(sum(values) / len(values) if values else fallback)
+               for hour, values in buckets.items()}
+    return profile, len(rows)
+
+
+def optimization_plan(sample, prices, weather):
+    """Create an explainable, read-only 48-hour battery schedule."""
+    if not sample:
+        return {"status": "waiting", "message": "Venter på første Modbus-måling.", "hours": []}
+    cfg, plan = options(), energy_plan()
+    local_tz = ZoneInfo("Europe/Copenhagen")
+    now = datetime.now(local_tz).replace(minute=0, second=0, microsecond=0)
+    end = now + timedelta(hours=48)
+    price_by_hour = {}
+    for row in prices:
+        try:
+            stamp = datetime.fromisoformat(row["time"])
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=local_tz)
+            stamp = stamp.astimezone(local_tz).replace(minute=0, second=0, microsecond=0)
+            if now <= stamp < end:
+                price_by_hour[stamp] = float(row["price_dkk_kwh"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    hourly = weather.get("hourly", {}) if weather else {}
+    radiation_by_hour = {}
+    for stamp, value in zip(hourly.get("time", []), hourly.get("global_tilted_irradiance", [])):
+        try:
+            dt = datetime.fromisoformat(str(stamp)).replace(tzinfo=local_tz)
+            radiation_by_hour[dt.replace(minute=0, second=0, microsecond=0)] = max(0.0, float(value or 0))
+        except (TypeError, ValueError):
+            continue
+    forecast_hours = sorted(price_by_hour)
+    if not forecast_hours:
+        return {"status": "waiting", "message": "Venter på fremtidige elpriser.", "hours": []}
+    prices_only = sorted(price_by_hour.values())
+    cheap = prices_only[max(0, len(prices_only) // 4 - 1)]
+    expensive = prices_only[min(len(prices_only) - 1, (len(prices_only) * 3) // 4)]
+    load_profile, learning_samples = hourly_load_profile()
+    capacity = float(plan["battery_capacity_kwh"])
+    efficiency = (float(plan["roundtrip_efficiency_percent"]) / 100.0) ** 0.5
+    reserve, target = float(plan["minimum_soc_morning"]), float(plan["target_soc"])
+    soc = max(0.0, min(100.0, float(sample.get("soc") or reserve)))
+    solar_factor = float(cfg.get("solar_capacity_kwp", 10)) * float(cfg.get("solar_performance_percent", 85)) / 100000.0
+    rows = []
+    for stamp in forecast_hours:
+        price = price_by_hour[stamp]
+        pv_kwh = radiation_by_hour.get(stamp, 0.0) * solar_factor
+        load_kwh = load_profile.get(stamp.hour, 1200) / 1000.0
+        surplus = pv_kwh - load_kwh
+        action, power_w, reason = "hold", 0, "Normal drift; behold fleksibiliteten."
+        if surplus > 0.10 and soc < target:
+            charge_kwh = min(surplus, float(plan["max_charge_w"]) / 1000.0, (target - soc) * capacity / 100.0 / efficiency)
+            power_w = -round(charge_kwh * 1000)
+            soc += charge_kwh * efficiency / capacity * 100.0
+            action, reason = "solar_charge", "Oplad batteriet med forventet soloverskud."
+        elif price <= cheap and soc < target:
+            charge_kwh = min(float(plan["max_charge_w"]) / 1000.0, (target - soc) * capacity / 100.0 / efficiency)
+            power_w = -round(charge_kwh * 1000)
+            soc += charge_kwh * efficiency / capacity * 100.0
+            action, reason = "grid_charge", "Billig time; forbered batteriet til dyrere timer."
+        elif price >= expensive and soc > reserve:
+            available = (soc - reserve) * capacity / 100.0 * efficiency
+            discharge_kwh = min(max(0.0, load_kwh - pv_kwh), float(plan["max_discharge_w"]) / 1000.0, available)
+            if discharge_kwh > 0.05:
+                power_w = round(discharge_kwh * 1000)
+                soc -= discharge_kwh / efficiency / capacity * 100.0
+                action, reason = "use_battery", "Dyr time; dæk huset fra batteriet ned til reserven."
+        rows.append({"time": stamp.isoformat(), "price_dkk_kwh": round(price, 4),
+                     "pv_forecast_kwh": round(pv_kwh, 2), "load_forecast_kwh": round(load_kwh, 2),
+                     "action": action, "battery_power_w": power_w,
+                     "projected_soc": round(max(reserve, min(target, soc)), 1), "reason": reason})
+    return {"status": "learning" if learning_samples < 168 else "learned",
+            "message": ("Foreløbig plan – belastningsprofilen lærer stadig." if learning_samples < 168
+                        else "Plan baseret på lokal belastningshistorik."),
+            "created": datetime.now(timezone.utc).isoformat(), "hours_available": len(rows),
+            "learning_samples": learning_samples, "cheap_limit": round(cheap, 4),
+            "expensive_limit": round(expensive, 4), "battery_capacity_kwh": capacity,
+            "reserve_soc": reserve, "target_soc": target, "battery_sale_enabled": False,
+            "read_only": True, "hours": rows}
+
+
 def planner(sample, prices, weather):
     plan = energy_plan()
     future = [p["price_dkk_kwh"] for p in prices if p.get("price_dkk_kwh") is not None]
@@ -494,7 +598,9 @@ def dashboard_data():
         sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone()
         decisions = conn.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT 20").fetchall()
     sample_data = dict(sample) if sample else None
-    return {"sample": sample_data, **dashboard_market(sample_data),
+    market = dashboard_market(sample_data)
+    prices, weather = market_data()
+    return {"sample": sample_data, **market, "optimization": optimization_plan(sample_data, prices, weather),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
             "read_only": True, "automatic_writes": False}
 
@@ -513,6 +619,8 @@ def analysis_package(days=7):
         "sample_interval_seconds", "solar_capacity_kwp", "solar_tilt_degrees",
         "solar_azimuth_degrees", "solar_performance_percent")}
     market = dashboard_market(samples[-1] if samples else None)
+    prices, weather = market_data()
+    optimization = optimization_plan(samples[-1] if samples else None, prices, weather)
     manifest = {
         "package_format": 1,
         "app": "Deye AI Bridge",
@@ -531,6 +639,7 @@ def analysis_package(days=7):
         "samples.json": samples,
         "decisions.json": decisions,
         "market_and_forecast.json": market,
+        "optimization_plan_48h.json": optimization,
     }
     if SNAPSHOT_FILE.exists():
         try: files["last_register_snapshot.json"] = json.loads(SNAPSHOT_FILE.read_text())
