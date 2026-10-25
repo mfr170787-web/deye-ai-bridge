@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.6.4
+# Deye AI Bridge 0.6.5
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
@@ -26,6 +26,7 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 - Den matte grønne Tesla fra hoveddashboardet vises i bilfeltet, mens kun rammen skifter statusfarve.
 - Inverteren er flyttet op, og laderikonet er centreret mellem inverter og bil for bedre læsbarhed.
 - Rettet Home Assistant-ingresssti til Tesla-billedet og afgrænset det store flow-SVG, så laderikonet bliver inde i sin firkant.
+- Tesla-billedet er indlejret direkte i HTML, så det ikke længere afhænger af filhentning gennem ingress.
 - Korrigeret total neteffekt til register 619 og total husbelastning til register 653.
 - Netfeltet viser samlet import/eksport med fed skrift samt L1, L2 og L3 nedenunder.
 - Live Modbus-data gemmes nu også, hvis elpris- eller vejrtjenesten midlertidigt fejler.
