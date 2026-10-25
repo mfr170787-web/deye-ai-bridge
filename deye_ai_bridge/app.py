@@ -31,7 +31,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.8"
+APP_VERSION = "0.6.9"
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -775,32 +775,37 @@ def tesla_shadow_plan(sample, prices):
 
 
 def tesla_energy_today():
-    """Estimate charged energy today from Tesla's per-session energy counter."""
+    """Integrate measured charger power since midnight.
+
+    Tesla's charge-energy-added entity can retain an old session or cumulative
+    value, so treating its first value as today's energy can produce impossible
+    results. Power integration is independent of that counter.
+    """
     local_tz = ZoneInfo("Europe/Copenhagen")
     start_local = datetime.now(local_tz).replace(hour=0, minute=0, second=0, microsecond=0)
     start_utc = start_local.astimezone(timezone.utc).isoformat()
     with db() as conn:
-        previous = conn.execute(
-            "SELECT tesla_charge_energy_added_kwh FROM samples "
-            "WHERE created<? AND tesla_charge_energy_added_kwh IS NOT NULL ORDER BY id DESC LIMIT 1",
-            (start_utc,),
-        ).fetchone()
         rows = conn.execute(
-            "SELECT tesla_charge_energy_added_kwh FROM samples "
-            "WHERE created>=? AND tesla_charge_energy_added_kwh IS NOT NULL ORDER BY id",
+            "SELECT created,tesla_charger_power_kw,tesla_charging_state FROM samples "
+            "WHERE created>=? AND tesla_charger_power_kw IS NOT NULL ORDER BY id",
             (start_utc,),
         ).fetchall()
-    last = float(previous[0]) if previous else 0.0
-    total = 0.0
+    total_kwh = 0.0
+    previous = None
     for row in rows:
-        current = max(0.0, float(row[0]))
-        if current >= last:
-            total += current - last
-        else:
-            # A lower counter means that a new charging session started.
-            total += current
-        last = current
-    return round(total, 2)
+        try:
+            stamp = datetime.fromisoformat(row["created"])
+            power_kw = max(0.0, float(row["tesla_charger_power_kw"] or 0))
+        except (TypeError, ValueError):
+            continue
+        if previous is not None:
+            seconds = max(0.0, min(300.0, (stamp - previous[0]).total_seconds()))
+            charging = (str(row["tesla_charging_state"] or "").lower() == "charging" or
+                        str(previous[2] or "").lower() == "charging")
+            if charging or power_kw > 0.05 or previous[1] > 0.05:
+                total_kwh += ((previous[1] + power_kw) / 2.0) * seconds / 3600.0
+        previous = (stamp, power_kw, row["tesla_charging_state"])
+    return round(total_kwh, 2)
 
 
 def collect_sample():
