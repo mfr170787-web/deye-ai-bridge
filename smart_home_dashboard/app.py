@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 
 
 def options():
@@ -99,7 +99,7 @@ def save_layout(data):
     rows = data.get("widgets", [])
     if not isinstance(rows, list) or len(rows) > 60:
         raise ValueError("Der kan højst gemmes 60 widgets")
-    allowed = {"entity", "energy", "price", "solar", "clock", "cover_group"}
+    allowed = {"entity", "energy", "price", "solar", "clock", "cover_group", "group"}
     clean = []
     for number, row in enumerate(rows):
         if not isinstance(row, dict) or row.get("type") not in allowed:
@@ -109,10 +109,12 @@ def save_layout(data):
             continue
         item = {"id": str(row.get("id") or "w%d" % number)[:80], "type": row["type"],
                 "entity_id": entity_id, "title": str(row.get("title", ""))[:100],
-                "size": "wide" if row.get("size") == "wide" else "normal"}
-        if row["type"] == "cover_group":
-            item["entity_ids"] = [str(x) for x in row.get("entity_ids", [])[:12]
-                                  if re.match(r"^cover\.[a-z0-9_]+$", str(x))]
+                "size": "wide" if row.get("size") == "wide" else "normal",
+                "height": row.get("height") if row.get("height") in {"normal", "medium", "tall"} else "normal"}
+        if row["type"] in {"cover_group", "group"}:
+            item["type"] = "group"
+            item["entity_ids"] = [str(x) for x in row.get("entity_ids", [])[:20]
+                                  if re.match(r"^(light|switch|input_boolean|fan|cover)\.[a-z0-9_]+$", str(x))]
             if len(item["entity_ids"]) < 2:
                 continue
         clean.append(item)
@@ -124,11 +126,24 @@ def save_layout(data):
 def control(data):
     entity_ids = data.get("entity_ids")
     if isinstance(entity_ids, list):
-        clean_ids = [str(x) for x in entity_ids[:12] if re.match(r"^cover\.[a-z0-9_]+$", str(x))]
+        clean_ids = [str(x) for x in entity_ids[:20]
+                     if re.match(r"^(light|switch|input_boolean|fan|cover)\.[a-z0-9_]+$", str(x))]
         action = str(data.get("action", ""))
-        if len(clean_ids) < 2 or action not in {"open_cover", "close_cover", "stop_cover"}:
-            raise ValueError("Gardingruppen eller handlingen er ugyldig")
-        ha("/services/cover/%s" % action, "POST", {"entity_id": clean_ids})
+        if len(clean_ids) < 2 or action not in {"group_on", "group_off", "group_stop"}:
+            raise ValueError("Gruppen eller handlingen er ugyldig")
+        grouped = {}
+        for entity_id in clean_ids:
+            grouped.setdefault(entity_id.split(".", 1)[0], []).append(entity_id)
+        for domain, ids in grouped.items():
+            if action == "group_stop":
+                if domain == "cover":
+                    ha("/services/cover/stop_cover", "POST", {"entity_id": ids})
+            elif domain == "cover":
+                service = "open_cover" if action == "group_on" else "close_cover"
+                ha("/services/cover/%s" % service, "POST", {"entity_id": ids})
+            else:
+                service = "turn_on" if action == "group_on" else "turn_off"
+                ha("/services/%s/%s" % (domain, service), "POST", {"entity_id": ids})
         return {"ok": True, "executed": True, "count": len(clean_ids)}
     entity_id = str(data.get("entity_id", ""))
     domain = entity_id.split(".", 1)[0]
