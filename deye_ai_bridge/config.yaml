@@ -1,6 +1,6 @@
 name: "Deye AI Bridge"
 description: "Sikker bro mellem Home Assistant, Deye Modbus og en kommende AI-agent"
-version: "0.5.4"
+version: "0.5.5"
 slug: "deye_ai_bridge"
 init: false
 arch:

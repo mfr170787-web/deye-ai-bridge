@@ -30,7 +30,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.5.5"
 
 REGISTER_MAP = {
     117: ("Minimum batteri-SOC", "%", 1, False),
@@ -236,6 +236,29 @@ def fetch_text(url):
         return response.read().decode("utf-8", "ignore")
 
 
+def n1_total_price(energy_price, stamp):
+    """Add 2026 N1 C-customer and national variable tariffs, all incl. VAT.
+
+    Fixed monthly subscriptions are intentionally excluded because they do not
+    change which hour is cheapest.
+    """
+    winter = stamp.month in (10, 11, 12, 1, 2, 3)
+    hour = stamp.hour
+    if hour < 6:
+        n1_tariff = 0.1098
+        band = "lavlast"
+    elif 17 <= hour < 21:
+        n1_tariff = 0.988 if winter else 0.4283
+        band = "spidslast"
+    else:
+        n1_tariff = 0.330 if winter else 0.165
+        band = "højlast"
+    energinet_tariffs = 0.14375  # 4.3 + 7.2 øre/kWh ex VAT
+    electricity_tax = 0.0100     # 0.8 øre/kWh ex VAT
+    total = float(energy_price) + n1_tariff + energinet_tariffs + electricity_tax
+    return round(total, 4), round(n1_tariff, 4), band
+
+
 def andel_flex_prices(area):
     page = fetch_text("https://andelenergi.dk/el/timepris/")
     match = re.search(r'\bdata-chart="([^"]+)"', page)
@@ -248,10 +271,15 @@ def andel_flex_prices(area):
     prices = []
     for index, value in enumerate(region.get("values", [])):
         stamp = (start + timedelta(hours=index)).astimezone(local_tz)
+        energy_price = float(value)
+        total_price, grid_tariff, tariff_band = n1_total_price(energy_price, stamp)
         prices.append({
             "time": stamp.isoformat(),
-            "price_dkk_kwh": round(float(value), 4),
-            "source": "Andel Energi FlexEnergi",
+            "price_dkk_kwh": total_price,
+            "energy_price_dkk_kwh": round(energy_price, 4),
+            "grid_tariff_dkk_kwh": grid_tariff,
+            "tariff_band": tariff_band,
+            "source": "Andel FlexEnergi + N1 og afgifter",
         })
     if not prices:
         raise RuntimeError("Andel returnerede ingen FlexEnergi-priser")
@@ -289,7 +317,7 @@ def load_prices(force=False):
     local_today = datetime.now(copenhagen).date()
     try:
         prices = andel_flex_prices(area)
-        source, error = "Andel Energi FlexEnergi", None
+        source, error = "Andel FlexEnergi + N1 og afgifter", None
     except Exception as andel_error:
         prices = fallback_spot_prices(area, local_today)
         source, error = "Offentlig spotpris (reserve)", str(andel_error)

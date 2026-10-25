@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.5.4
+# Deye AI Bridge 0.5.5
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
@@ -30,6 +30,7 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 - Energinet-kaldet bruger nu faste danske datoer og Europe/Copenhagen, så dagens timepriser indlæses stabilt.
 - Dagens solprognose kombinerer nu inverterens faktiske produktion med prognosen for de resterende timer.
 - Knapper til en privatlivsrenset analysepakke med enten 24 timers eller 7 dages historik.
+- Samlet FlexEnergi-købspris med N1's tidsdifferentierede 2026-nettarif samt Energinets tariffer og elafgift. Faste abonnementer er ikke medregnet.
 
 ## Sikkerhedsmodel
 
