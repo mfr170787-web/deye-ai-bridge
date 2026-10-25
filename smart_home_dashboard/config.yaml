@@ -1,6 +1,6 @@
 name: "Smart Home Dashboard"
 description: "Flytbart dashboard til energi, Tuya, Hue, vejr og Home Assistant"
-version: "0.1.1"
+version: "0.1.2"
 slug: "smart_home_dashboard"
 init: false
 arch:
@@ -13,6 +13,6 @@ panel_icon: "mdi:view-dashboard-variant"
 panel_title: "Mit hjem"
 homeassistant_api: true
 options:
-  deye_bridge_url: "http://deye_ai_bridge:8099"
+  deye_bridge_url: "http://30046a15_deye_ai_bridge:8099"
 schema:
   deye_bridge_url: str
