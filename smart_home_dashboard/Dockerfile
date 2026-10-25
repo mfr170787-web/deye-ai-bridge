@@ -1,7 +1,7 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
+FROM ghcr.io/home-assistant/base:3.24
 
 RUN apk add --no-cache python3
-COPY app.py index.html run.sh /app/
+WORKDIR /app
+COPY app.py index.html run.sh ./
 RUN chmod a+x /app/run.sh
 CMD ["/app/run.sh"]
