@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.5.5
+# Deye AI Bridge 0.6.0
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
