@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.6.2
+# Deye AI Bridge 0.6.3
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
@@ -23,6 +23,8 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 - Tesla-data medtages i analysepakken; ingen Tesla-kommandoer udføres i denne version.
 - Energiflowet viser nu en separat lader mellem inverter og Tesla med grå, rød eller grøn status.
 - Tesla-noden viser batteriprocent og beregnet opladet energi for den aktuelle dag.
+- Den matte grønne Tesla fra hoveddashboardet vises i bilfeltet, mens kun rammen skifter statusfarve.
+- Inverteren er flyttet op, og laderikonet er centreret mellem inverter og bil for bedre læsbarhed.
 - Korrigeret total neteffekt til register 619 og total husbelastning til register 653.
 - Netfeltet viser samlet import/eksport med fed skrift samt L1, L2 og L3 nedenunder.
 - Live Modbus-data gemmes nu også, hvis elpris- eller vejrtjenesten midlertidigt fejler.
