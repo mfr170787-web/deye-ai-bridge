@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.6.5
+# Deye AI Bridge 0.6.8
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
@@ -20,6 +20,7 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 - Responsivt live-flow med animerede energiprikker for sol, net, batteri og hus.
 - Tesla Fleet er kortlagt read-only med kabelstatus, SOC, ladeeffekt, strøm, spænding, ladestatus og 80 %-grænse.
 - Tesla Shadow Mode foreslår opladning fra soloverskud eller billige timer og beskytter husets batterireserve om aftenen.
+- Tesla Long Range-ladeplanen beregner energibehov og billigste timer frem mod afgang og sender en tilslutningspåmindelse via Home Assistant eller den valgte Companion App.
 - Tesla-data medtages i analysepakken; ingen Tesla-kommandoer udføres i denne version.
 - Energiflowet viser nu en separat lader mellem inverter og Tesla med grå, rød eller grøn status.
 - Tesla-noden viser batteriprocent og beregnet opladet energi for den aktuelle dag.
