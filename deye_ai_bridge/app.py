@@ -30,7 +30,22 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
+
+TESLA_ENTITIES = {
+    "tesla_connected": "binary_sensor.tessi_opladerkabel",
+    "tesla_online": "binary_sensor.tessi_status",
+    "tesla_soc": "sensor.tessi_battery_level",
+    "tesla_charging_state": "sensor.tessi_charging",
+    "tesla_charger_power_kw": "sensor.tessi_charger_power",
+    "tesla_charger_current_a": "sensor.tessi_charger_current",
+    "tesla_charger_voltage_v": "sensor.tessi_charger_voltage",
+    "tesla_charge_energy_added_kwh": "sensor.tessi_charge_energy_added",
+    "tesla_charge_limit": "number.tessi_charge_limit",
+    "tesla_charge_current_limit_a": "number.tessi_charge_current",
+    "tesla_charge_switch": "switch.tessi_charge",
+    "tesla_time_to_full": "sensor.tessi_time_to_full_charge",
+}
 
 REGISTER_MAP = {
     117: ("Minimum batteri-SOC", "%", 1, False),
@@ -125,6 +140,35 @@ def deye_entities():
     return result
 
 
+def tesla_state():
+    """Read the verified Tesla Fleet entities from Home Assistant without writing."""
+    try:
+        states = {item.get("entity_id"): item for item in ha_request("/states")}
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+
+    result = {"available": False, "error": None}
+    numeric = {
+        "tesla_soc", "tesla_charger_power_kw", "tesla_charger_current_a",
+        "tesla_charger_voltage_v", "tesla_charge_energy_added_kwh",
+        "tesla_charge_limit", "tesla_charge_current_limit_a",
+    }
+    for key, entity_id in TESLA_ENTITIES.items():
+        item = states.get(entity_id)
+        value = item.get("state") if item else None
+        if key in numeric:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = None
+        elif key in ("tesla_connected", "tesla_online"):
+            value = value == "on"
+        result[key] = value
+        result[key + "_entity_id"] = entity_id
+    result["available"] = result.get("tesla_soc") is not None
+    return result
+
+
 def read_holding(start, count):
     cfg = options()
     if count < 1 or count > 125 or start < 0 or start > 65535 or start + count > 65536:
@@ -172,6 +216,8 @@ def energy_plan():
         "main_fuse_ampere": 35, "automatic_control": False,
         "battery_capacity_kwh": 32.0, "max_discharge_w": 8000,
         "roundtrip_efficiency_percent": 90,
+        "tesla_target_soc": 80, "tesla_departure_time": "07:00",
+        "tesla_shadow_mode": True,
     }
     try:
         defaults.update(json.loads(PLAN_FILE.read_text()))
@@ -191,6 +237,10 @@ def save_energy_plan(data):
     plan["battery_capacity_kwh"] = max(5, min(100, float(plan["battery_capacity_kwh"])))
     plan["max_discharge_w"] = max(0, min(12000, int(plan["max_discharge_w"])))
     plan["roundtrip_efficiency_percent"] = max(70, min(100, int(plan["roundtrip_efficiency_percent"])))
+    plan["tesla_target_soc"] = max(50, min(80, int(plan["tesla_target_soc"])))
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(plan["tesla_departure_time"])):
+        plan["tesla_departure_time"] = "07:00"
+    plan["tesla_shadow_mode"] = True
     plan["main_fuse_ampere"] = 35
     plan["automatic_control"] = False
     PLAN_FILE.write_text(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -224,9 +274,18 @@ def init_db():
         sample_columns = {row[1] for row in conn.execute("PRAGMA table_info(samples)")}
         for column in ("grid_l1_w", "grid_l2_w", "grid_l3_w", "pv1_w", "pv2_w",
                        "battery_charge_today", "battery_discharge_today",
-                       "grid_import_today", "grid_export_today", "load_today", "pv_today"):
+                       "grid_import_today", "grid_export_today", "load_today", "pv_today",
+                       "tesla_soc", "tesla_charger_power_kw", "tesla_charger_current_a",
+                       "tesla_charger_voltage_v", "tesla_charge_energy_added_kwh",
+                       "tesla_charge_limit", "tesla_charge_current_limit_a"):
             if column not in sample_columns:
                 conn.execute(f"ALTER TABLE samples ADD COLUMN {column} REAL")
+        for column in ("tesla_connected", "tesla_online"):
+            if column not in sample_columns:
+                conn.execute(f"ALTER TABLE samples ADD COLUMN {column} INTEGER")
+        for column in ("tesla_charging_state", "tesla_charge_switch", "tesla_time_to_full"):
+            if column not in sample_columns:
+                conn.execute(f"ALTER TABLE samples ADD COLUMN {column} TEXT")
 
 
 def fetch_json(url):
@@ -545,6 +604,46 @@ def planner(sample, prices, weather):
     return "hold", "Ingen ændring foreslås", "Pris, solprognose og batteriniveau giver ikke grund til at ændre driften nu.", details
 
 
+def tesla_shadow_plan(sample, prices):
+    """Explain what smart charging would do; never sends a command."""
+    plan = energy_plan()
+    if not sample or sample.get("tesla_soc") is None:
+        return {"action": "waiting", "title": "Venter på Tesla-data",
+                "explanation": "Tesla Fleet-data er endnu ikke tilgængelige.", "read_only": True}
+    connected = bool(sample.get("tesla_connected"))
+    charging = str(sample.get("tesla_charging_state") or "").lower() == "charging"
+    car_soc = float(sample.get("tesla_soc") or 0)
+    target = min(80, int(plan.get("tesla_target_soc", 80)))
+    if not connected:
+        action, title, explanation = "disconnected", "Tesla er ikke tilsluttet", "Der planlægges ingen opladning, før ladekablet forbindes."
+    elif car_soc >= target:
+        action, title = "stop" if charging else "complete", "Tesla har nået målet"
+        explanation = f"Bilen er på {car_soc:.0f} %, og grænsen er {target} %. Shadow Mode ville stoppe opladningen."
+    else:
+        future = sorted(float(p["price_dkk_kwh"]) for p in prices if p.get("price_dkk_kwh") is not None)
+        cheap = future[max(0, len(future) // 4 - 1)] if future else None
+        price = sample.get("price_dkk")
+        home_soc = float(sample.get("soc") or 0)
+        reserve = float(plan.get("minimum_soc_morning", 20))
+        grid_w = float(sample.get("grid_w") or 0)
+        if grid_w < -1000 and home_soc >= reserve + 10:
+            action, title = "solar_charge", "Soloverskud kan bruges til Teslaen"
+            explanation = "Huset eksporterer strøm, og hjemmebatteriet har reserve. Shadow Mode ville foreslå opladning nu."
+        elif 16 <= datetime.now(ZoneInfo("Europe/Copenhagen")).hour < 22 and home_soc <= reserve + 15:
+            action, title = "protect_house", "Bevar strøm til huset"
+            explanation = "Det er aftentid, og hjemmebatteriets reserve prioriteres til madlavning og dyrere timer. Teslaen bør vente."
+        elif price is not None and cheap is not None and float(price) <= cheap:
+            action, title = "grid_charge", "Billig time til Tesla-opladning"
+            explanation = f"Prisen {float(price):.3f} kr/kWh er blandt de billigste tilgængelige timer."
+        else:
+            action, title = "wait", "Vent på en billigere time"
+            explanation = f"Teslaen er tilsluttet ved {car_soc:.0f} %. Planen holder målet på højst {target} % og prioriterer huset først."
+    return {"action": action, "title": title, "explanation": explanation,
+            "connected": connected, "charging": charging, "soc": car_soc,
+            "target_soc": target, "departure_time": plan.get("tesla_departure_time", "07:00"),
+            "read_only": True}
+
+
 def collect_sample():
     regs = {}
     for start, count in [(117, 1), (141, 37), (514, 16), (587, 5), (616, 4), (650, 4), (672, 2)]:
@@ -560,6 +659,7 @@ def collect_sample():
     daily = weather.get("daily", {}) if weather else {}
     solar_values = daily.get("shortwave_radiation_sum", [])
     solar_tomorrow = float(solar_values[1]) if len(solar_values) > 1 else None
+    tesla = tesla_state()
     sample = {
         "created": datetime.now(timezone.utc).isoformat(), "soc": regs.get(588, {}).get("value"),
         "battery_w": regs.get(590, {}).get("value"), "grid_w": regs.get(619, {}).get("value"),
@@ -581,10 +681,22 @@ def collect_sample():
         "price_dkk": current_price(prices), "solar_tomorrow": solar_tomorrow,
         "market_error": market_error,
     }
+    for key in TESLA_ENTITIES:
+        sample[key] = tesla.get(key)
     action, title, explanation, details = planner(sample, prices, weather)
     with db() as conn:
-        conn.execute("""INSERT INTO samples(created,soc,battery_w,grid_w,grid_l1_w,grid_l2_w,grid_l3_w,load_w,pv_w,pv1_w,pv2_w,battery_charge_today,battery_discharge_today,grid_import_today,grid_export_today,load_today,pv_today,reg117,reg141,reg142,reg145,reg146,tou_json,price_dkk,solar_tomorrow)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (sample["created"], sample["soc"], sample["battery_w"], sample["grid_w"], sample["grid_l1_w"], sample["grid_l2_w"], sample["grid_l3_w"], sample["load_w"], sample["pv_w"], sample["pv1_w"], sample["pv2_w"], sample["battery_charge_today"], sample["battery_discharge_today"], sample["grid_import_today"], sample["grid_export_today"], sample["load_today"], sample["pv_today"], sample["reg117"], sample["reg141"], sample["reg142"], sample["reg145"], sample["reg146"], json.dumps(sample["tou"]), sample["price_dkk"], sample["solar_tomorrow"]))
+        columns = [
+            "created", "soc", "battery_w", "grid_w", "grid_l1_w", "grid_l2_w", "grid_l3_w",
+            "load_w", "pv_w", "pv1_w", "pv2_w", "battery_charge_today",
+            "battery_discharge_today", "grid_import_today", "grid_export_today", "load_today",
+            "pv_today", "reg117", "reg141", "reg142", "reg145", "reg146", "tou_json",
+            "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(),
+        ]
+        values = [json.dumps(sample["tou"]) if key == "tou_json" else sample.get(key) for key in columns]
+        conn.execute(
+            "INSERT INTO samples(%s) VALUES(%s)" % (",".join(columns), ",".join("?" for _ in columns)),
+            values,
+        )
         last = conn.execute("SELECT action,title,details_json,created FROM decisions ORDER BY id DESC LIMIT 1").fetchone()
         should_add = not last or last["action"] != action or time.time() - datetime.fromisoformat(last["created"]).timestamp() > 3600
         if should_add:
@@ -601,6 +713,7 @@ def dashboard_data():
     market = dashboard_market(sample_data)
     prices, weather = market_data()
     return {"sample": sample_data, **market, "optimization": optimization_plan(sample_data, prices, weather),
+            "tesla_shadow": tesla_shadow_plan(sample_data, prices),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
             "read_only": True, "automatic_writes": False}
 
