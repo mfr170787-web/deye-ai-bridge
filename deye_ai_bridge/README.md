@@ -1,4 +1,4 @@
-# Deye AI Bridge 0.6.0
+# Deye AI Bridge 0.6.1
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
@@ -18,7 +18,9 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 - Forklarlige forslag med Godkend/Afvis og revisionshistorik.
 - Komplet før/efter-snapshot til opdagelse af nyere EV/LoRa-registre.
 - Responsivt live-flow med animerede energiprikker for sol, net, batteri og hus.
-- EV-laderen vises som ikke kortlagt, indtil dens register er verificeret.
+- Tesla Fleet er kortlagt read-only med kabelstatus, SOC, ladeeffekt, strøm, spænding, ladestatus og 80 %-grænse.
+- Tesla Shadow Mode foreslår opladning fra soloverskud eller billige timer og beskytter husets batterireserve om aftenen.
+- Tesla-data medtages i analysepakken; ingen Tesla-kommandoer udføres i denne version.
 - Korrigeret total neteffekt til register 619 og total husbelastning til register 653.
 - Netfeltet viser samlet import/eksport med fed skrift samt L1, L2 og L3 nedenunder.
 - Live Modbus-data gemmes nu også, hvis elpris- eller vejrtjenesten midlertidigt fejler.
@@ -34,7 +36,7 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
 ## Sikkerhedsmodel
 
-Version 0.3 er fysisk låst til read-only. En godkendelse registreres kun i den lokale historik og
+Version 0.6.1 er fysisk låst til read-only. En godkendelse registreres kun i den lokale historik og
 udfører ingen Modbus-skrivning. Deye AI Copilot kan derfor fortsætte som eneste aktive styring.
 - Oversigt over Deye-enheder i Home Assistant.
 - Read-only: ingen Modbus-skrivning og ingen ændring af Home Assistant-filer.
