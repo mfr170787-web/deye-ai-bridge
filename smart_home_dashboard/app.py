@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 
 
 def options():
@@ -99,7 +99,7 @@ def save_layout(data):
     rows = data.get("widgets", [])
     if not isinstance(rows, list) or len(rows) > 60:
         raise ValueError("Der kan højst gemmes 60 widgets")
-    allowed = {"entity", "energy", "price", "solar", "clock"}
+    allowed = {"entity", "energy", "price", "solar", "clock", "cover_group"}
     clean = []
     for number, row in enumerate(rows):
         if not isinstance(row, dict) or row.get("type") not in allowed:
@@ -107,15 +107,29 @@ def save_layout(data):
         entity_id = str(row.get("entity_id", ""))[:160]
         if row["type"] == "entity" and not re.match(r"^[a-z_]+\.[a-z0-9_]+$", entity_id):
             continue
-        clean.append({"id": str(row.get("id") or "w%d" % number)[:80], "type": row["type"],
-                      "entity_id": entity_id, "title": str(row.get("title", ""))[:100],
-                      "size": "wide" if row.get("size") == "wide" else "normal"})
+        item = {"id": str(row.get("id") or "w%d" % number)[:80], "type": row["type"],
+                "entity_id": entity_id, "title": str(row.get("title", ""))[:100],
+                "size": "wide" if row.get("size") == "wide" else "normal"}
+        if row["type"] == "cover_group":
+            item["entity_ids"] = [str(x) for x in row.get("entity_ids", [])[:12]
+                                  if re.match(r"^cover\.[a-z0-9_]+$", str(x))]
+            if len(item["entity_ids"]) < 2:
+                continue
+        clean.append(item)
     saved = {"widgets": clean, "updated": datetime.now(timezone.utc).isoformat()}
     LAYOUT_FILE.write_text(json.dumps(saved, ensure_ascii=False, indent=2))
     return saved
 
 
 def control(data):
+    entity_ids = data.get("entity_ids")
+    if isinstance(entity_ids, list):
+        clean_ids = [str(x) for x in entity_ids[:12] if re.match(r"^cover\.[a-z0-9_]+$", str(x))]
+        action = str(data.get("action", ""))
+        if len(clean_ids) < 2 or action not in {"open_cover", "close_cover", "stop_cover"}:
+            raise ValueError("Gardingruppen eller handlingen er ugyldig")
+        ha("/services/cover/%s" % action, "POST", {"entity_id": clean_ids})
+        return {"ok": True, "executed": True, "count": len(clean_ids)}
     entity_id = str(data.get("entity_id", ""))
     domain = entity_id.split(".", 1)[0]
     action = str(data.get("action", ""))
