@@ -2,6 +2,6 @@ FROM ghcr.io/home-assistant/base:3.24
 
 RUN apk add --no-cache python3
 WORKDIR /app
-COPY app.py index.html run.sh ./
+COPY app.py index.html run.sh tesla_icon.jpeg ./
 RUN chmod a+x /app/run.sh
 CMD ["/app/run.sh"]

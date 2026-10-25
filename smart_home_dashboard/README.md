@@ -1,4 +1,4 @@
-# Smart Home Dashboard 0.1.4
+# Smart Home Dashboard 0.1.5
 
 Separat Home Assistant-dashboard med flytbare widgets til Deye-energi, priser,
 solprognose, Tuya, Philips Hue, temperatur, vejr og øvrige HA-enheder.

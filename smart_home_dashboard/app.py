@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 
 def options():
@@ -154,6 +154,11 @@ class Handler(BaseHTTPRequestHandler):
             if path.endswith("/api/layout"): return self.json(layout())
             if path.endswith("/api/deye"): return self.json(deye_data())
             if path.endswith("/api/status"): return self.json({"version": VERSION, "ha": True})
+            if path.endswith("/tesla_icon.jpeg"):
+                body = (APP_DIR / "tesla_icon.jpeg").read_bytes()
+                self.send_response(200); self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
             body = (APP_DIR / "index.html").read_bytes()
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
