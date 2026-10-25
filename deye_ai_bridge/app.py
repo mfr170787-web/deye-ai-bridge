@@ -30,7 +30,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -644,6 +644,35 @@ def tesla_shadow_plan(sample, prices):
             "read_only": True}
 
 
+def tesla_energy_today():
+    """Estimate charged energy today from Tesla's per-session energy counter."""
+    local_tz = ZoneInfo("Europe/Copenhagen")
+    start_local = datetime.now(local_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc).isoformat()
+    with db() as conn:
+        previous = conn.execute(
+            "SELECT tesla_charge_energy_added_kwh FROM samples "
+            "WHERE created<? AND tesla_charge_energy_added_kwh IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (start_utc,),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT tesla_charge_energy_added_kwh FROM samples "
+            "WHERE created>=? AND tesla_charge_energy_added_kwh IS NOT NULL ORDER BY id",
+            (start_utc,),
+        ).fetchall()
+    last = float(previous[0]) if previous else 0.0
+    total = 0.0
+    for row in rows:
+        current = max(0.0, float(row[0]))
+        if current >= last:
+            total += current - last
+        else:
+            # A lower counter means that a new charging session started.
+            total += current
+        last = current
+    return round(total, 2)
+
+
 def collect_sample():
     regs = {}
     for start, count in [(117, 1), (141, 37), (514, 16), (587, 5), (616, 4), (650, 4), (672, 2)]:
@@ -712,6 +741,8 @@ def dashboard_data():
     sample_data = dict(sample) if sample else None
     market = dashboard_market(sample_data)
     prices, weather = market_data()
+    if sample_data:
+        sample_data["tesla_energy_today_kwh"] = tesla_energy_today()
     return {"sample": sample_data, **market, "optimization": optimization_plan(sample_data, prices, weather),
             "tesla_shadow": tesla_shadow_plan(sample_data, prices),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
