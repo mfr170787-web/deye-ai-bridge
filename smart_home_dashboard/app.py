@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 
 
 def options():
