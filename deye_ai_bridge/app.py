@@ -24,13 +24,14 @@ DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 SNAPSHOT_FILE = DATA_DIR / "last_snapshot.json"
 PLAN_FILE = DATA_DIR / "energy_plan.json"
+TESLA_REMINDER_FILE = DATA_DIR / "tesla_reminder.json"
 DB_FILE = DATA_DIR / "shadow.db"
 FULL_SNAPSHOT_FILE = DATA_DIR / "full_snapshot.json"
 CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.7"
+APP_VERSION = "0.6.8"
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -114,10 +115,13 @@ def options():
     return defaults
 
 
-def ha_request(path):
+def ha_request(path, method="GET", data=None):
     token = os.environ.get("SUPERVISOR_TOKEN", "")
+    payload = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(
         "http://supervisor/core/api" + path,
+        data=payload,
+        method=method,
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=8) as response:
@@ -138,6 +142,33 @@ def deye_entities():
                 "name": name,
             })
     return result
+
+
+def notification_services():
+    """Return Home Assistant notify services so the phone can be selected in the UI."""
+    try:
+        domains = ha_request("/services")
+        notify = next((item for item in domains if item.get("domain") == "notify"), {})
+        result = []
+        for service, details in sorted((notify.get("services") or {}).items()):
+            if service in ("persistent_notification",):
+                continue
+            fields = details or {}
+            result.append({"service": service,
+                           "name": fields.get("name") or service.replace("_", " ").title()})
+        return result
+    except Exception:
+        return []
+
+
+def send_ha_notification(service, title, message):
+    """Send to the selected Companion App, falling back to HA's notification centre."""
+    if service and re.fullmatch(r"[a-z0-9_]+", str(service)):
+        return ha_request("/services/notify/" + str(service), "POST",
+                          {"title": title, "message": message})
+    return ha_request("/services/persistent_notification/create", "POST",
+                      {"title": title, "message": message,
+                       "notification_id": "deye_ai_tesla_charge_reminder"})
 
 
 def tesla_state():
@@ -217,6 +248,8 @@ def energy_plan():
         "battery_capacity_kwh": 32.0, "max_discharge_w": 8000,
         "roundtrip_efficiency_percent": 90,
         "tesla_target_soc": 80, "tesla_departure_time": "07:00",
+        "tesla_arrival_time": "16:00", "tesla_battery_capacity_kwh": 75.0,
+        "tesla_charge_power_kw": 11.0, "tesla_notify_service": "",
         "tesla_shadow_mode": True,
     }
     try:
@@ -238,8 +271,13 @@ def save_energy_plan(data):
     plan["max_discharge_w"] = max(0, min(12000, int(plan["max_discharge_w"])))
     plan["roundtrip_efficiency_percent"] = max(70, min(100, int(plan["roundtrip_efficiency_percent"])))
     plan["tesla_target_soc"] = max(50, min(80, int(plan["tesla_target_soc"])))
-    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(plan["tesla_departure_time"])):
-        plan["tesla_departure_time"] = "07:00"
+    for key, fallback in (("tesla_departure_time", "07:00"), ("tesla_arrival_time", "16:00")):
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(plan[key])):
+            plan[key] = fallback
+    plan["tesla_battery_capacity_kwh"] = max(40, min(100, float(plan["tesla_battery_capacity_kwh"])))
+    plan["tesla_charge_power_kw"] = max(2.0, min(22.0, float(plan["tesla_charge_power_kw"])))
+    service = str(plan.get("tesla_notify_service") or "").strip()
+    plan["tesla_notify_service"] = service if re.fullmatch(r"[a-z0-9_]*", service) else ""
     plan["tesla_shadow_mode"] = True
     plan["main_fuse_ampere"] = 35
     plan["automatic_control"] = False
@@ -604,6 +642,96 @@ def planner(sample, prices, weather):
     return "hold", "Ingen ændring foreslås", "Pris, solprognose og batteriniveau giver ikke grund til at ændre driften nu.", details
 
 
+def tesla_charge_schedule(sample, prices):
+    """Calculate the cheapest available charging hours before the next departure."""
+    plan = energy_plan()
+    local_tz = ZoneInfo("Europe/Copenhagen")
+    now = datetime.now(local_tz)
+    departure_h, departure_m = map(int, str(plan.get("tesla_departure_time", "07:00")).split(":"))
+    arrival_h, arrival_m = map(int, str(plan.get("tesla_arrival_time", "16:00")).split(":"))
+    departure = now.replace(hour=departure_h, minute=departure_m, second=0, microsecond=0)
+    if departure <= now:
+        departure += timedelta(days=1)
+    arrival = departure.replace(hour=arrival_h, minute=arrival_m)
+    if arrival >= departure:
+        arrival -= timedelta(days=1)
+    window_start = max(now, arrival)
+    soc = float(sample.get("tesla_soc") or 0) if sample else 0.0
+    target = min(80, int(plan.get("tesla_target_soc", 80)))
+    capacity = float(plan.get("tesla_battery_capacity_kwh", 75.0))
+    power = float(plan.get("tesla_charge_power_kw", 11.0))
+    energy = max(0.0, (target - soc) / 100.0 * capacity)
+    # Allow for AC charging loss and a little taper near the target.
+    duration = energy / max(0.1, power * 0.90)
+    required_slots = int(duration) + (1 if duration % 1 else 0)
+    candidates = []
+    for row in prices:
+        try:
+            stamp = datetime.fromisoformat(str(row["time"]))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=local_tz)
+            stamp = stamp.astimezone(local_tz).replace(minute=0, second=0, microsecond=0)
+            if window_start.replace(minute=0, second=0, microsecond=0) <= stamp < departure:
+                candidates.append({"time": stamp, "price": float(row["price_dkk_kwh"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    cheapest = sorted(candidates, key=lambda item: (item["price"], item["time"]))[:required_slots]
+    selected = sorted(cheapest, key=lambda item: item["time"])
+    fallback_start = departure - timedelta(hours=duration)
+    plug_by = min((item["time"] for item in selected), default=fallback_start)
+    return {
+        "soc": round(soc, 1), "target_soc": target,
+        "energy_needed_kwh": round(energy, 1), "estimated_hours": round(duration, 1),
+        "charge_power_kw": power, "departure": departure.isoformat(),
+        "arrival": arrival.isoformat(), "plug_in_by": plug_by.isoformat(),
+        "price_hours_available": len(candidates),
+        "selected_hours": [{"time": item["time"].isoformat(),
+                            "price_dkk_kwh": round(item["price"], 4)} for item in selected],
+    }
+
+
+def maybe_send_tesla_reminder(sample, prices):
+    """Send at most one plug-in reminder for each departure window."""
+    if not sample or sample.get("tesla_soc") is None or sample.get("tesla_connected"):
+        return
+    schedule = tesla_charge_schedule(sample, prices)
+    if schedule["energy_needed_kwh"] <= 0:
+        return
+    now = datetime.now(ZoneInfo("Europe/Copenhagen"))
+    arrival = datetime.fromisoformat(schedule["arrival"])
+    plug_by = datetime.fromisoformat(schedule["plug_in_by"])
+    # Notify when the normal home window begins; waiting until the cheap slot
+    # could make the reminder arrive after the household has gone to bed.
+    if now < arrival:
+        return
+    key = schedule["departure"][:10] + ":" + str(schedule["target_soc"])
+    previous = {}
+    try:
+        previous = json.loads(TESLA_REMINDER_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    if previous.get("key") == key:
+        return
+    hours = schedule["selected_hours"]
+    if hours:
+        first = datetime.fromisoformat(hours[0]["time"]).strftime("%H:%M")
+        last_end = (datetime.fromisoformat(hours[-1]["time"]) + timedelta(hours=1)).strftime("%H:%M")
+        cheap_text = f"De valgte billige ladetimer ligger mellem kl. {first} og {last_end}."
+    else:
+        cheap_text = "Morgendagens priser er endnu ikke komplette, så tidspunktet er et sikkert estimat."
+    message = (f"Teslaen er på {schedule['soc']:.0f} %. Tilslut bilen senest kl. "
+               f"{plug_by.strftime('%H:%M')} for at kunne nå {schedule['target_soc']} % inden kl. "
+               f"{datetime.fromisoformat(schedule['departure']).strftime('%H:%M')}. "
+               f"Der mangler cirka {schedule['energy_needed_kwh']:.1f} kWh. {cheap_text}")
+    try:
+        send_ha_notification(energy_plan().get("tesla_notify_service", ""),
+                             "Tesla skal sættes til opladning", message)
+        TESLA_REMINDER_FILE.write_text(json.dumps({"key": key, "sent": now.isoformat(),
+                                                   "message": message}, ensure_ascii=False, indent=2))
+    except Exception as exc:
+        print("Tesla reminder failed: %s" % exc, flush=True)
+
+
 def tesla_shadow_plan(sample, prices):
     """Explain what smart charging would do; never sends a command."""
     plan = energy_plan()
@@ -638,9 +766,11 @@ def tesla_shadow_plan(sample, prices):
         else:
             action, title = "wait", "Vent på en billigere time"
             explanation = f"Teslaen er tilsluttet ved {car_soc:.0f} %. Planen holder målet på højst {target} % og prioriterer huset først."
+    schedule = tesla_charge_schedule(sample, prices)
     return {"action": action, "title": title, "explanation": explanation,
             "connected": connected, "charging": charging, "soc": car_soc,
             "target_soc": target, "departure_time": plan.get("tesla_departure_time", "07:00"),
+            "charge_schedule": schedule,
             "read_only": True}
 
 
@@ -731,6 +861,7 @@ def collect_sample():
         if should_add:
             conn.execute("INSERT INTO decisions(created,action,title,explanation,details_json) VALUES(?,?,?,?,?)",
                          (sample["created"], action, title, explanation, json.dumps(details, ensure_ascii=False)))
+    maybe_send_tesla_reminder(sample, prices)
     return sample
 
 
@@ -924,6 +1055,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(status())
             if path.endswith("/api/entities"):
                 return self.send_json(deye_entities())
+            if path.endswith("/api/notification-services"):
+                return self.send_json(notification_services())
             if path.endswith("/api/snapshot"):
                 if not SNAPSHOT_FILE.exists():
                     return self.send_json({"saved": False})
