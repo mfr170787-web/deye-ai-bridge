@@ -30,7 +30,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -939,6 +939,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/zip")
                 self.send_header("Content-Disposition", "attachment; filename=deye-analyse-%dd-%s.zip" % (days, stamp))
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if path.endswith("/tesla_icon.b64"):
+                payload = (APP_DIR / "tesla_icon.b64").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=us-ascii")
+                self.send_header("Cache-Control", "public, max-age=86400")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
