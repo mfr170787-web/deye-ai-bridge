@@ -1,0 +1,38 @@
+name: "Deye AI Bridge"
+description: "Sikker bro mellem Home Assistant, Deye Modbus og en kommende AI-agent"
+version: "0.5.4"
+slug: "deye_ai_bridge"
+init: false
+arch:
+  - aarch64
+startup: services
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: "mdi:robot-industrial"
+panel_title: "Deye AI"
+homeassistant_api: true
+options:
+  deye_host: "DIN_DEYE_IP"
+  deye_port: 502
+  slave_id: 1
+  timeout_seconds: 3
+  read_only: true
+  price_area: "DK1"
+  sample_interval_seconds: 60
+  solar_capacity_kwp: 10
+  solar_tilt_degrees: 30
+  solar_azimuth_degrees: 90
+  solar_performance_percent: 85
+schema:
+  deye_host: str
+  deye_port: port
+  slave_id: int(1,247)
+  timeout_seconds: int(1,15)
+  read_only: bool
+  price_area: list(DK1|DK2)
+  sample_interval_seconds: int(30,900)
+  solar_capacity_kwp: float(0,50)
+  solar_tilt_degrees: int(0,90)
+  solar_azimuth_degrees: int(-180,180)
+  solar_performance_percent: int(50,100)
