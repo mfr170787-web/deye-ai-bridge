@@ -1,6 +1,6 @@
 name: "Smart Home Dashboard"
 description: "Flytbart dashboard til energi, Tuya, Hue, vejr og Home Assistant"
-version: "0.2.0"
+version: "0.2.1"
 slug: "smart_home_dashboard"
 init: false
 arch:
