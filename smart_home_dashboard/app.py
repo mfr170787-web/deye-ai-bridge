@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 
 
 def options():
@@ -128,11 +128,16 @@ def control(data):
 
 
 def deye_data():
-    base = options()["deye_bridge_url"].rstrip("/")
-    try:
-        return {"connected": True, "data": request_json(base + "/api/shadow", timeout=6)}
-    except Exception as exc:
-        return {"connected": False, "error": str(exc), "data": None}
+    configured = options()["deye_bridge_url"].rstrip("/")
+    candidates = [configured, "http://30046a15_deye_ai_bridge:8099", "http://deye_ai_bridge:8099"]
+    errors = []
+    for base in dict.fromkeys(candidates):
+        try:
+            return {"connected": True, "source": base,
+                    "data": request_json(base + "/api/shadow", timeout=6)}
+        except Exception as exc:
+            errors.append("%s: %s" % (base, exc))
+    return {"connected": False, "error": " | ".join(errors), "data": None}
 
 
 class Handler(BaseHTTPRequestHandler):
