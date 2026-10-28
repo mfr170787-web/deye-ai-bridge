@@ -1,4 +1,20 @@
-# Deye AI Bridge 0.6.9
+# Deye AI Bridge 0.7.0
+
+## Nyt i 0.7.0 — fortsat Shadow Mode
+
+- Fælles prisvindue for beslutningslog og husplan; gamle timer påvirker ikke prisgrænserne.
+- Foreløbig dynamisk husreserve i procent/kWh, forventet husbehov, næste genopladningsmulighed og muligt batteribidrag til Tesla.
+- Reserven krediterer 70 % af solprognosen og anvender 15 % af batterikapaciteten som sikkerhedsmargin samt den eksisterende minimums-SOC. En solmulighed kræver to sammenhængende forventede overskudstimer. Manglende prognosedækning frigiver ikke strøm til bilen.
+- Husplanen er en heuristisk prognose uden fremtidig Tesla-belastning, ikke en færdig fælles økonomisk optimering. Nettets grænser, Tesla og batteri koordineres endnu ikke automatisk.
+- Planen starter ved faktisk SOC, også under reserven. Første times energi reduceres til den resterende del af timen.
+- Præcise ladetidsrum frem til afgang; ufuldstændige natpriser vises som foreløbige og markedsføres ikke som billigste plan.
+- Husprofilen fratrækker kun valideret Tesla-effekt. Tilsluttede perioder med ukendte, gamle eller fysisk usandsynlige bildata udelades fra læringen.
+- Nye målinger gemmer HA-effektsensorens last_updated. Uændrede værdier kan blive markeret som gamle, selv hvis bilen faktisk fortsætter; derfor er dagsenergi et delvist estimat. Ældre historik uden tidsstempel kan ikke valideres bagud.
+- Gem Tesla-plan giver lokal bekræftelse, tidspunkt/modtager og fejlstatus. Planfilen erstattes atomisk.
+- Seneste ladebesked gemmes og vises i Tesla-kortet. Nye beskeder spejles til HA-notifikationscenteret, og mobilbeskeder linker til add-onens ingress.
+- Påmindelser sendes ved hjemkomstvinduet, ikke i det tidlige morgenvindue.
+- Analysepakken medtager Tesla-plan, dynamisk reserve, besked og datatidsstempler.
+- Automatisk styring er stadig låst fra. Ingen Modbus- eller Tesla-styrekommandoer udføres.
 
 Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
