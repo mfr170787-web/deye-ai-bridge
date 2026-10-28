@@ -1,4 +1,15 @@
-# Deye AI Bridge 0.7.1
+# Deye AI Bridge 0.7.2
+
+## Nyt i 0.7.2
+
+- Løbende read-only logning af fjernstyring/watchdog (1100–1101), kontrolside/styringsform (1104–1105) og effekt/SOC-setpunkter (1109–1110).
+- Små separate registerkald; læsefejl i nye områder gemmes uden at afbryde indsamlingen af kernemålinger. Der skrives fortsat intet til inverteren.
+- Urregistre 62–64 sammenlignes med dansk lokal tid ved aflæsningen. Forskydning og ugyldigt ur vises i dashboardet; uret justeres ikke.
+- Logning af batteriindstillinger, BMS-grænser og beregnede V × A-effektgrænser, samt 32-bit energitotaler fra 516–528. Effektgrænser er diagnostiske estimater og ændrer ikke planlægningen i denne version.
+- Register 117 hedder korrekt LowBatt-SOC; Shutdown og Restart vises separat. Register 143 navngives maksimal salgseffekt.
+- EV 259–260 logges som rå værdier med ikke-verificeret skala. 65535 i watchdog betyder deaktiveret; ukendte værdier i andre felter fortolkes ikke som gyldige grænser.
+- Registerhistorik gemmes i samples.telemetry_json og seneste afkodning i modbus_telemetry.json i analysepakken. Eksisterende historik og brugerindstillinger bevares.
+- Ny diagnosevisning i dashboardet for ur, batterigrænser og fjernstyring. Læsbare registre beviser ikke, at skrivning understøttes.
 
 ## Nyt i 0.7.1
 
@@ -69,7 +80,7 @@ Første sikre trin til en lokal AI-agent på Home Assistant OS.
 
 ## Sikkerhedsmodel
 
-Version 0.6.1 er fysisk låst til read-only. En godkendelse registreres kun i den lokale historik og
+Denne version er låst til read-only. En godkendelse registreres kun i den lokale historik og
 udfører ingen Modbus-skrivning. Deye AI Copilot kan derfor fortsætte som eneste aktive styring.
 - Oversigt over Deye-enheder i Home Assistant.
 - Read-only: ingen Modbus-skrivning og ingen ændring af Home Assistant-filer.
