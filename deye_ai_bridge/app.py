@@ -31,7 +31,8 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.7.2"
+from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from shadow_planning import price_window, limits, reserve, charge_schedule
 
@@ -51,7 +52,7 @@ TESLA_ENTITIES = {
 }
 
 REGISTER_MAP = {
-    117: ("Minimum batteri-SOC", "%", 1, False),
+    117: ("Batteri LowBatt-SOC", "%", 1, False),
     141: ("Energy management bitfelt", "", 1, False),
     142: ("Grid/eksport-mode", "", 1, False),
     143: ("Maksimal nettilsluttet effekt", "W", 1, False),
@@ -95,6 +96,7 @@ REGISTER_MAP = {
     678: ("PV2-spænding", "V", 0.1, False),
 }
 
+REGISTER_MAP.update(TELEMETRY_REGISTERS)
 
 def options():
     defaults = {
@@ -349,7 +351,7 @@ def init_db():
         for column in ("tesla_connected", "tesla_online"):
             if column not in sample_columns:
                 conn.execute(f"ALTER TABLE samples ADD COLUMN {column} INTEGER")
-        for column in ("tesla_charging_state", "tesla_charge_switch", "tesla_time_to_full", "tesla_power_updated"):
+        for column in ("tesla_charging_state", "tesla_charge_switch", "tesla_time_to_full", "tesla_power_updated", "telemetry_json"):
             if column not in sample_columns:
                 conn.execute(f"ALTER TABLE samples ADD COLUMN {column} TEXT")
 
@@ -828,11 +830,33 @@ def tesla_energy_today():
     return round(total_kwh, 2)
 
 
+def read_optional_telemetry(regs):
+    errors = []
+    clock_reference = None
+    # Isolated small reads: one unsupported register must not discard core data.
+    for start, count in [(62,3), (108,2), (115,2), (127,4), (210,8),
+                         (259,2), (1100,2), (1104,2), (1109,2)]:
+        try:
+            before = datetime.now(ZoneInfo("Europe/Copenhagen"))
+            rows = read_holding(start, count)
+            after = datetime.now(ZoneInfo("Europe/Copenhagen"))
+            for item in rows:
+                regs[item["address"]] = item
+            if start == 62:
+                clock_reference = before+(after-before)/2
+        except Exception as exc:
+            errors.append({"start":start,"count":count,"error":str(exc)})
+    raw = {address:item.get("uint16") for address,item in regs.items()
+           if address in TELEMETRY_REGISTERS or address == 587}
+    return decode_telemetry(raw, clock_reference, errors)
+
+
 def collect_sample():
     regs = {}
     for start, count in [(117, 1), (141, 37), (514, 16), (587, 5), (616, 4), (650, 4), (672, 2)]:
         for item in read_holding(start, count):
             regs[item["address"]] = item
+    telemetry = read_optional_telemetry(regs)
     market_error = None
     try:
         prices, weather = market_data()
@@ -864,6 +888,7 @@ def collect_sample():
         "tou": {str(x): regs.get(x, {}).get("uint16") for x in range(148, 178)},
         "price_dkk": current_price(prices), "solar_tomorrow": solar_tomorrow,
         "market_error": market_error,
+        "telemetry_json": json.dumps(telemetry, ensure_ascii=False),
     }
     for key in [*TESLA_ENTITIES, "tesla_power_updated"]:
         sample[key] = tesla.get(key)
@@ -874,7 +899,7 @@ def collect_sample():
             "load_w", "pv_w", "pv1_w", "pv2_w", "battery_charge_today",
             "battery_discharge_today", "grid_import_today", "grid_export_today", "load_today",
             "pv_today", "reg117", "reg141", "reg142", "reg145", "reg146", "tou_json",
-            "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(), "tesla_power_updated",
+            "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(), "tesla_power_updated", "telemetry_json",
         ]
         values = [json.dumps(sample["tou"]) if key == "tou_json" else sample.get(key) for key in columns]
         conn.execute(
@@ -912,6 +937,7 @@ def dashboard_data():
         sample_data["tesla_energy_today_kwh"] = accounting["car_kwh"]
     optimization = optimization_plan(sample_data, prices, weather)
     return {"sample": sample_data, **market, "optimization": optimization,
+            "modbus_telemetry": json.loads(sample_data["telemetry_json"]) if sample_data and sample_data.get("telemetry_json") else None,
             "daily_energy": accounting,
             "last_tesla_reminder": last_tesla_reminder(),
             "tesla_shadow": tesla_shadow_plan(sample_data, prices, optimization),
@@ -957,6 +983,7 @@ def analysis_package(days=7):
         "daily_energy.json": daily_accounting(prices),
         "tesla_shadow.json": tesla_shadow_plan(samples[-1] if samples else None, prices, optimization),
         "tesla_reminder.json": last_tesla_reminder(),
+        "modbus_telemetry.json": json.loads(samples[-1]["telemetry_json"]) if samples and samples[-1].get("telemetry_json") else None,
     }
     if SNAPSHOT_FILE.exists():
         try: files["last_register_snapshot.json"] = json.loads(SNAPSHOT_FILE.read_text())
