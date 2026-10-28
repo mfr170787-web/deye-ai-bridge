@@ -31,7 +31,8 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
+from energy_accounting import daily_energy
 from shadow_planning import price_window, limits, reserve, charge_schedule
 
 TESLA_ENTITIES = {
@@ -889,6 +890,16 @@ def collect_sample():
     return sample
 
 
+def daily_accounting(prices):
+    now = datetime.now(ZoneInfo("Europe/Copenhagen"))
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = (start.astimezone(timezone.utc)-timedelta(seconds=120)).isoformat()
+    with db() as conn:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT * FROM samples WHERE created>=? ORDER BY id", (cutoff,))]
+    return daily_energy(rows, prices, now, validated_tesla_power)
+
+
 def dashboard_data():
     with db() as conn:
         sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone()
@@ -896,10 +907,12 @@ def dashboard_data():
     sample_data = dict(sample) if sample else None
     market = dashboard_market(sample_data)
     prices, weather = market_data()
+    accounting = daily_accounting(prices)
     if sample_data:
-        sample_data["tesla_energy_today_kwh"] = tesla_energy_today()
+        sample_data["tesla_energy_today_kwh"] = accounting["car_kwh"]
     optimization = optimization_plan(sample_data, prices, weather)
     return {"sample": sample_data, **market, "optimization": optimization,
+            "daily_energy": accounting,
             "last_tesla_reminder": last_tesla_reminder(),
             "tesla_shadow": tesla_shadow_plan(sample_data, prices, optimization),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
@@ -941,6 +954,7 @@ def analysis_package(days=7):
         "decisions.json": decisions,
         "market_and_forecast.json": market,
         "optimization_plan_48h.json": optimization,
+        "daily_energy.json": daily_accounting(prices),
         "tesla_shadow.json": tesla_shadow_plan(samples[-1] if samples else None, prices, optimization),
         "tesla_reminder.json": last_tesla_reminder(),
     }
