@@ -1,4 +1,13 @@
-# Deye AI Bridge 0.7.0
+# Deye AI Bridge 0.7.1
+
+## Nyt i 0.7.1
+
+- Husnoden viser dagens registrerede husforbrug, bilforbrug og total. Energi i perioder med usikre bildata vises særskilt som uafklaret i stedet for at blive tildelt huset.
+- Under timeprisgrafen vises en liste med pris, købte kWh og beregnet beløb pr. time, inklusive dagssummer og markering af manglende data.
+- Dagsværdier integreres fra minutmålingerne i dansk lokal tid; inverterens nulstillede dagstællere bruges ikke til denne fordeling.
+- Netimport integreres separat fra eksport og fordeles på de rigtige timer, også over midnat og skift mellem sommer-/vintertid. Manglende måleperioder udfyldes ikke.
+- Tesla-nodens dagsenergi bruger samme beregning som husets fordeling. Fordelingen er et estimat baseret på Tesla-effekt, ikke en separat Deye-ladermåler.
+- Dagsfordeling og timeindkøb medtages i snapshot som daily_energy.json.
 
 ## Nyt i 0.7.0 — fortsat Shadow Mode
 
