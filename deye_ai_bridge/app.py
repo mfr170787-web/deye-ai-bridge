@@ -31,7 +31,8 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.6.9"
+APP_VERSION = "0.7.0"
+from shadow_planning import price_window, limits, reserve, charge_schedule
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -161,14 +162,35 @@ def notification_services():
         return []
 
 
+def last_tesla_reminder():
+    try:
+        return json.loads(TESLA_REMINDER_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def send_ha_notification(service, title, message):
-    """Send to the selected Companion App, falling back to HA's notification centre."""
+    # Mirror to HA so clearing the push does not lose the recommendation.
+    ha_request("/services/persistent_notification/create", "POST",
+               {"title": title, "message": message,
+                "notification_id": "deye_ai_tesla_charge_reminder"})
     if service and re.fullmatch(r"[a-z0-9_]+", str(service)):
-        return ha_request("/services/notify/" + str(service), "POST",
-                          {"title": title, "message": message})
-    return ha_request("/services/persistent_notification/create", "POST",
-                      {"title": title, "message": message,
-                       "notification_id": "deye_ai_tesla_charge_reminder"})
+        data = {"title": title, "message": message}
+        if str(service).startswith("mobile_app_"):
+            data["data"] = {"url": "/hassio/ingress/" + addon_slug(),
+                            "tag": "deye_ai_tesla_charge_reminder"}
+        return ha_request("/services/notify/" + str(service), "POST", data)
+
+
+def addon_slug():
+    try:
+        token = os.environ.get("SUPERVISOR_TOKEN", "")
+        req = urllib.request.Request("http://supervisor/addons/self/info",
+                                     headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return json.load(response)["data"]["slug"]
+    except Exception:
+        return "deye_ai_bridge"
 
 
 def tesla_state():
@@ -193,9 +215,11 @@ def tesla_state():
             except (TypeError, ValueError):
                 value = None
         elif key in ("tesla_connected", "tesla_online"):
-            value = value == "on"
+            value = None if value in (None, "unknown", "unavailable") else value == "on"
         result[key] = value
         result[key + "_entity_id"] = entity_id
+        if key == "tesla_charger_power_kw":
+            result["tesla_power_updated"] = item.get("last_updated") if item else None
     result["available"] = result.get("tesla_soc") is not None
     return result
 
@@ -250,7 +274,7 @@ def energy_plan():
         "tesla_target_soc": 80, "tesla_departure_time": "07:00",
         "tesla_arrival_time": "16:00", "tesla_battery_capacity_kwh": 75.0,
         "tesla_charge_power_kw": 11.0, "tesla_notify_service": "",
-        "tesla_shadow_mode": True,
+        "tesla_shadow_mode": True, "reserve_margin_percent": 15,
     }
     try:
         defaults.update(json.loads(PLAN_FILE.read_text()))
@@ -281,7 +305,10 @@ def save_energy_plan(data):
     plan["tesla_shadow_mode"] = True
     plan["main_fuse_ampere"] = 35
     plan["automatic_control"] = False
-    PLAN_FILE.write_text(json.dumps(plan, ensure_ascii=False, indent=2))
+    plan["saved_at"] = datetime.now(timezone.utc).isoformat()
+    pending = PLAN_FILE.with_suffix(".tmp")
+    pending.write_text(json.dumps(plan, ensure_ascii=False, indent=2))
+    pending.replace(PLAN_FILE)
     return plan
 
 
@@ -321,7 +348,7 @@ def init_db():
         for column in ("tesla_connected", "tesla_online"):
             if column not in sample_columns:
                 conn.execute(f"ALTER TABLE samples ADD COLUMN {column} INTEGER")
-        for column in ("tesla_charging_state", "tesla_charge_switch", "tesla_time_to_full"):
+        for column in ("tesla_charging_state", "tesla_charge_switch", "tesla_time_to_full", "tesla_power_updated"):
             if column not in sample_columns:
                 conn.execute(f"ALTER TABLE samples ADD COLUMN {column} TEXT")
 
@@ -527,12 +554,16 @@ def hourly_load_profile():
     cutoff = (datetime.now(timezone.utc) - timedelta(days=21)).isoformat()
     buckets = {hour: [] for hour in range(24)}
     with db() as conn:
-        rows = conn.execute("SELECT created,load_w FROM samples WHERE created>=? AND load_w IS NOT NULL", (cutoff,)).fetchall()
+        rows = conn.execute("SELECT * FROM samples WHERE created>=? AND load_w IS NOT NULL", (cutoff,)).fetchall()
     local_tz = ZoneInfo("Europe/Copenhagen")
     all_values = []
     for row in rows:
         try:
             value = max(0.0, float(row["load_w"]))
+            ev = validated_tesla_power(dict(row))
+            if ev is None:
+                continue  # uncertain car data must not teach a false house profile
+            value = max(0.0, value - ev * 1000)
             hour = datetime.fromisoformat(row["created"]).astimezone(local_tz).hour
             buckets[hour].append(value)
             all_values.append(value)
@@ -544,155 +575,125 @@ def hourly_load_profile():
     return profile, len(rows)
 
 
-def optimization_plan(sample, prices, weather):
-    """Create an explainable, read-only 48-hour battery schedule."""
-    if not sample:
-        return {"status": "waiting", "message": "Venter på første Modbus-måling.", "hours": []}
-    cfg, plan = options(), energy_plan()
-    local_tz = ZoneInfo("Europe/Copenhagen")
-    now = datetime.now(local_tz).replace(minute=0, second=0, microsecond=0)
-    end = now + timedelta(hours=48)
-    price_by_hour = {}
-    for row in prices:
-        try:
-            stamp = datetime.fromisoformat(row["time"])
-            if stamp.tzinfo is None:
-                stamp = stamp.replace(tzinfo=local_tz)
-            stamp = stamp.astimezone(local_tz).replace(minute=0, second=0, microsecond=0)
-            if now <= stamp < end:
-                price_by_hour[stamp] = float(row["price_dkk_kwh"])
-        except (KeyError, TypeError, ValueError):
-            continue
-    hourly = weather.get("hourly", {}) if weather else {}
-    radiation_by_hour = {}
+def validated_tesla_power(sample):
+    """Unknown/stale or physically inconsistent power is not treated as zero."""
+    if sample.get("tesla_connected") == 0:
+        return 0.0
+    if sample.get("tesla_connected") is None:
+        return None
+    power = sample.get("tesla_charger_power_kw")
+    try:
+        updated = datetime.fromisoformat(sample.get("tesla_power_updated") or "")
+        measured = datetime.fromisoformat(sample["created"])
+        age = (measured-updated).total_seconds()
+        if not 0 <= age <= 300 or power is None:
+            return None
+        power = float(power)
+        if not 0 <= power <= 22 or power*1000 > float(sample["load_w"])+500:
+            return None
+        return power
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def forecast_slots(prices, weather, now):
+    profile, count = hourly_load_profile()
+    radiation = {}
+    hourly = (weather or {}).get("hourly", {})
     for stamp, value in zip(hourly.get("time", []), hourly.get("global_tilted_irradiance", [])):
         try:
-            dt = datetime.fromisoformat(str(stamp)).replace(tzinfo=local_tz)
-            radiation_by_hour[dt.replace(minute=0, second=0, microsecond=0)] = max(0.0, float(value or 0))
-        except (TypeError, ValueError):
-            continue
-    forecast_hours = sorted(price_by_hour)
-    if not forecast_hours:
-        return {"status": "waiting", "message": "Venter på fremtidige elpriser.", "hours": []}
-    prices_only = sorted(price_by_hour.values())
-    cheap = prices_only[max(0, len(prices_only) // 4 - 1)]
-    expensive = prices_only[min(len(prices_only) - 1, (len(prices_only) * 3) // 4)]
-    load_profile, learning_samples = hourly_load_profile()
+            dt = datetime.fromisoformat(stamp).replace(tzinfo=now.tzinfo)
+            radiation[dt] = max(0, float(value or 0))
+        except (ValueError, TypeError):
+            pass
+    cfg = options()
+    factor = cfg["solar_capacity_kwp"]*cfg["solar_performance_percent"]/100000
+    slots = []
+    for p in price_window(prices, now):
+        fraction = min(1, max(0, (p["time"]+timedelta(hours=1)-now).total_seconds()/3600))
+        slots.append({**p, "fraction": fraction, "load": profile[p["time"].hour]/1000,
+                      "pv": radiation.get(p["time"], 0)*factor})
+    return slots, count
+
+
+def optimization_plan(sample, prices, weather):
+    if not sample:
+        return {"status": "waiting", "message": "Venter på målinger.", "hours": []}
+    now = datetime.now(ZoneInfo("Europe/Copenhagen"))
+    slots, count = forecast_slots(prices, weather, now)
+    if not slots:
+        return {"status": "waiting", "message": "Venter på fremtidige priser.", "hours": []}
+    plan = energy_plan()
     capacity = float(plan["battery_capacity_kwh"])
-    efficiency = (float(plan["roundtrip_efficiency_percent"]) / 100.0) ** 0.5
-    reserve, target = float(plan["minimum_soc_morning"]), float(plan["target_soc"])
-    soc = max(0.0, min(100.0, float(sample.get("soc") or reserve)))
-    solar_factor = float(cfg.get("solar_capacity_kwp", 10)) * float(cfg.get("solar_performance_percent", 85)) / 100000.0
+    eta = (plan["roundtrip_efficiency_percent"]/100)**.5
+    soc = float(sample.get("soc") or 0)
+    initial_soc = soc
+    cheap, expensive = limits(prices, now)
+    dynamic = reserve(slots, plan)
+    # Do not release a Tesla allowance until a refill opportunity is covered.
+    allowance = max(0, (soc-dynamic["reserve_soc"])*capacity/100*eta) if dynamic["forecast_complete"] else 0
+    dynamic["tesla_available_kwh"] = round(allowance, 2)
+    dynamic["actual_soc"] = initial_soc
     rows = []
-    for stamp in forecast_hours:
-        price = price_by_hour[stamp]
-        pv_kwh = radiation_by_hour.get(stamp, 0.0) * solar_factor
-        load_kwh = load_profile.get(stamp.hour, 1200) / 1000.0
-        surplus = pv_kwh - load_kwh
-        action, power_w, reason = "hold", 0, "Normal drift; behold fleksibiliteten."
-        if surplus > 0.10 and soc < target:
-            charge_kwh = min(surplus, float(plan["max_charge_w"]) / 1000.0, (target - soc) * capacity / 100.0 / efficiency)
-            power_w = -round(charge_kwh * 1000)
-            soc += charge_kwh * efficiency / capacity * 100.0
-            action, reason = "solar_charge", "Oplad batteriet med forventet soloverskud."
-        elif price <= cheap and soc < target:
-            charge_kwh = min(float(plan["max_charge_w"]) / 1000.0, (target - soc) * capacity / 100.0 / efficiency)
-            power_w = -round(charge_kwh * 1000)
-            soc += charge_kwh * efficiency / capacity * 100.0
-            action, reason = "grid_charge", "Billig time; forbered batteriet til dyrere timer."
-        elif price >= expensive and soc > reserve:
-            available = (soc - reserve) * capacity / 100.0 * efficiency
-            discharge_kwh = min(max(0.0, load_kwh - pv_kwh), float(plan["max_discharge_w"]) / 1000.0, available)
-            if discharge_kwh > 0.05:
-                power_w = round(discharge_kwh * 1000)
-                soc -= discharge_kwh / efficiency / capacity * 100.0
-                action, reason = "use_battery", "Dyr time; dæk huset fra batteriet ned til reserven."
-        rows.append({"time": stamp.isoformat(), "price_dkk_kwh": round(price, 4),
-                     "pv_forecast_kwh": round(pv_kwh, 2), "load_forecast_kwh": round(load_kwh, 2),
-                     "action": action, "battery_power_w": power_w,
-                     "projected_soc": round(max(reserve, min(target, soc)), 1), "reason": reason})
-    return {"status": "learning" if learning_samples < 168 else "learned",
-            "message": ("Foreløbig plan – belastningsprofilen lærer stadig." if learning_samples < 168
-                        else "Plan baseret på lokal belastningshistorik."),
-            "created": datetime.now(timezone.utc).isoformat(), "hours_available": len(rows),
-            "learning_samples": learning_samples, "cheap_limit": round(cheap, 4),
-            "expensive_limit": round(expensive, 4), "battery_capacity_kwh": capacity,
-            "reserve_soc": reserve, "target_soc": target, "battery_sale_enabled": False,
-            "read_only": True, "hours": rows}
+    for i, slot in enumerate(slots):
+        req = reserve(slots[i:], plan)
+        fraction = slot["fraction"]
+        deficit = (slot["load"]-slot["pv"]*.7)*fraction
+        action, energy, reason = "hold", 0.0, "Bevar reserve; huset kan bruge nettet."
+        if deficit < 0 and soc < plan["target_soc"]:
+            energy = -min(-deficit, plan["max_charge_w"]/1000*fraction,
+                          (plan["target_soc"]-soc)*capacity/100/eta)
+            action, reason = "solar_charge", "Forventet soloverskud efter husforbrug."
+        elif slot["price"] <= cheap and soc < plan["target_soc"]:
+            # Charge only for the upcoming house deficit before the next opportunity.
+            after = reserve(slots[i+1:], plan)
+            target = min(plan["target_soc"], after["reserve_soc"])
+            energy = -min(plan["max_charge_w"]/1000*fraction, max(0, (target-soc)*capacity/100/eta))
+            if energy < -.01:
+                action, reason = "grid_charge", "Pris blandt de billigste; fyld op til beregnet husreserve."
+        elif slot["price"] > cheap and soc > plan["minimum_soc_morning"]:
+            energy = min(max(0, deficit), plan["max_discharge_w"]/1000*fraction,
+                         max(0, (soc-plan["minimum_soc_morning"])*capacity/100*eta))
+            if energy > .01:
+                action, reason = "use_battery", "Dæk huset fra batteriet; Tesla må kun bruge energi over husreserven."
+        soc += (-energy*eta if energy < 0 else -energy/eta)/capacity*100
+        soc = max(0, min(100, soc))
+        rows.append({"time": slot["time"].isoformat(), "price_dkk_kwh": round(slot["price"], 4),
+                     "pv_forecast_kwh": round(slot["pv"]*fraction, 2),
+                     "load_forecast_kwh": round(slot["load"]*fraction, 2),
+                     "action": action, "battery_power_w": round(energy/max(fraction,.001)*1000),
+                     "projected_soc": round(soc, 1), "reserve_soc": req["reserve_soc"], "reason": reason})
+    return {"status": "learning", "message": "Foreløbig husplan uden fremtidig Tesla-belastning; sol vægtet 70 %.",
+            "created": now.isoformat(), "hours_available": len(rows), "learning_samples": count,
+            "cheap_limit": cheap, "expensive_limit": expensive, "battery_capacity_kwh": capacity,
+            "reserve_soc": dynamic["reserve_soc"], "target_soc": plan["target_soc"],
+            "initial_soc": initial_soc, "dynamic_reserve": dynamic,
+            "battery_sale_enabled": False, "read_only": True, "hours": rows}
 
 
 def planner(sample, prices, weather):
-    plan = energy_plan()
-    future = [p["price_dkk_kwh"] for p in prices if p.get("price_dkk_kwh") is not None]
-    price = sample.get("price_dkk")
-    low = sorted(future)[max(0, len(future) // 4 - 1)] if future else None
-    high = sorted(future)[min(len(future) - 1, (len(future) * 3) // 4)] if future else None
-    solar = sample.get("solar_tomorrow") or 0
-    soc = sample.get("soc") or 0
-    details = {"soc": soc, "price_dkk_kwh": price, "cheap_limit": low,
-               "expensive_limit": high, "solar_forecast_kwh_m2": solar,
-               "target_soc": plan["target_soc"], "minimum_soc_morning": plan["minimum_soc_morning"]}
-    if price is not None and low is not None and price <= low and soc < plan["target_soc"] and solar < 2.0:
-        return "charge", "Billig opladning foreslås", "Prisen er blandt de billigste timer, solprognosen er lav, og batteriet er under mål-SOC.", details
-    if (plan["allow_battery_sale"] and price is not None and high is not None and
-            price >= high and soc > max(plan["minimum_soc_morning"] + 20, 50)):
-        return "sell", "Batterisalg kunne være fordelagtigt", "Prisen er blandt de dyreste timer, og batteriet har reserve over morgenmålet.", details
-    if soc <= plan["minimum_soc_morning"]:
-        return "protect", "Batterireserve beskyttes", "SOC er på eller under den valgte morgenreserve; afladning bør begrænses.", details
-    return "hold", "Ingen ændring foreslås", "Pris, solprognose og batteriniveau giver ikke grund til at ændre driften nu.", details
+    model = optimization_plan(sample, prices, weather)
+    dynamic = model.get("dynamic_reserve", {})
+    details = {"soc": sample.get("soc"), "price_dkk_kwh": sample.get("price_dkk"),
+               "cheap_limit": model.get("cheap_limit"), "expensive_limit": model.get("expensive_limit"),
+               "dynamic_reserve": dynamic}
+    if not model.get("hours"):
+        return "hold", "Venter på prisdata", model["message"], details
+    row = model["hours"][0]
+    if sample.get("soc", 0) < dynamic.get("reserve_soc", 0):
+        return "protect", "Reserven til huset er begrænset", "Tesla bør bruge nettet eller vente; vurder næste genopladningsmulighed.", details
+    titles = {"grid_charge": "Netopladning foreslås", "solar_charge": "Gem soloverskud",
+              "use_battery": "Brug batteriet til huset", "hold": "Bevar fleksibiliteten"}
+    return row["action"], titles[row["action"]], row["reason"], details
 
 
 def tesla_charge_schedule(sample, prices):
-    """Calculate the cheapest available charging hours before the next departure."""
-    plan = energy_plan()
-    local_tz = ZoneInfo("Europe/Copenhagen")
-    now = datetime.now(local_tz)
-    departure_h, departure_m = map(int, str(plan.get("tesla_departure_time", "07:00")).split(":"))
-    arrival_h, arrival_m = map(int, str(plan.get("tesla_arrival_time", "16:00")).split(":"))
-    departure = now.replace(hour=departure_h, minute=departure_m, second=0, microsecond=0)
-    if departure <= now:
-        departure += timedelta(days=1)
-    arrival = departure.replace(hour=arrival_h, minute=arrival_m)
-    if arrival >= departure:
-        arrival -= timedelta(days=1)
-    window_start = max(now, arrival)
-    soc = float(sample.get("tesla_soc") or 0) if sample else 0.0
-    target = min(80, int(plan.get("tesla_target_soc", 80)))
-    capacity = float(plan.get("tesla_battery_capacity_kwh", 75.0))
-    power = float(plan.get("tesla_charge_power_kw", 11.0))
-    energy = max(0.0, (target - soc) / 100.0 * capacity)
-    # Allow for AC charging loss and a little taper near the target.
-    duration = energy / max(0.1, power * 0.90)
-    required_slots = int(duration) + (1 if duration % 1 else 0)
-    candidates = []
-    for row in prices:
-        try:
-            stamp = datetime.fromisoformat(str(row["time"]))
-            if stamp.tzinfo is None:
-                stamp = stamp.replace(tzinfo=local_tz)
-            stamp = stamp.astimezone(local_tz).replace(minute=0, second=0, microsecond=0)
-            if window_start.replace(minute=0, second=0, microsecond=0) <= stamp < departure:
-                candidates.append({"time": stamp, "price": float(row["price_dkk_kwh"])})
-        except (KeyError, TypeError, ValueError):
-            continue
-    cheapest = sorted(candidates, key=lambda item: (item["price"], item["time"]))[:required_slots]
-    selected = sorted(cheapest, key=lambda item: item["time"])
-    fallback_start = departure - timedelta(hours=duration)
-    plug_by = min((item["time"] for item in selected), default=fallback_start)
-    return {
-        "soc": round(soc, 1), "target_soc": target,
-        "energy_needed_kwh": round(energy, 1), "estimated_hours": round(duration, 1),
-        "charge_power_kw": power, "departure": departure.isoformat(),
-        "arrival": arrival.isoformat(), "plug_in_by": plug_by.isoformat(),
-        "price_hours_available": len(candidates),
-        "selected_hours": [{"time": item["time"].isoformat(),
-                            "price_dkk_kwh": round(item["price"], 4)} for item in selected],
-    }
+    return charge_schedule(sample or {}, prices, energy_plan(), datetime.now(ZoneInfo("Europe/Copenhagen")))
 
 
 def maybe_send_tesla_reminder(sample, prices):
     """Send at most one plug-in reminder for each departure window."""
-    if not sample or sample.get("tesla_soc") is None or sample.get("tesla_connected"):
+    if not sample or sample.get("tesla_soc") is None or sample.get("tesla_connected") not in (False, 0):
         return
     schedule = tesla_charge_schedule(sample, prices)
     if schedule["energy_needed_kwh"] <= 0:
@@ -702,8 +703,10 @@ def maybe_send_tesla_reminder(sample, prices):
     plug_by = datetime.fromisoformat(schedule["plug_in_by"])
     # Notify when the normal home window begins; waiting until the cheap slot
     # could make the reminder arrive after the household has gone to bed.
-    if now < arrival:
+    if now < arrival or now.hour < 12:
         return
+    if not schedule["prices_complete"]:
+        plug_by = max(now, arrival)
     key = schedule["departure"][:10] + ":" + str(schedule["target_soc"])
     previous = {}
     try:
@@ -713,12 +716,12 @@ def maybe_send_tesla_reminder(sample, prices):
     if previous.get("key") == key:
         return
     hours = schedule["selected_hours"]
-    if hours:
+    if schedule["status"] == "ready" and hours:
         first = datetime.fromisoformat(hours[0]["time"]).strftime("%H:%M")
-        last_end = (datetime.fromisoformat(hours[-1]["time"]) + timedelta(hours=1)).strftime("%H:%M")
+        last_end = datetime.fromisoformat(hours[-1]["end"]).strftime("%H:%M")
         cheap_text = f"De valgte billige ladetimer ligger mellem kl. {first} og {last_end}."
     else:
-        cheap_text = "Morgendagens priser er endnu ikke komplette, så tidspunktet er et sikkert estimat."
+        cheap_text = "Hele ladevinduets priser er ikke kendt eller ladetiden er utilstrækkelig. Tilslut bilen ved hjemkomst; planen er foreløbig."
     message = (f"Teslaen er på {schedule['soc']:.0f} %. Tilslut bilen senest kl. "
                f"{plug_by.strftime('%H:%M')} for at kunne nå {schedule['target_soc']} % inden kl. "
                f"{datetime.fromisoformat(schedule['departure']).strftime('%H:%M')}. "
@@ -732,7 +735,7 @@ def maybe_send_tesla_reminder(sample, prices):
         print("Tesla reminder failed: %s" % exc, flush=True)
 
 
-def tesla_shadow_plan(sample, prices):
+def tesla_shadow_plan(sample, prices, optimization=None):
     """Explain what smart charging would do; never sends a command."""
     plan = energy_plan()
     if not sample or sample.get("tesla_soc") is None:
@@ -743,16 +746,15 @@ def tesla_shadow_plan(sample, prices):
     car_soc = float(sample.get("tesla_soc") or 0)
     target = min(80, int(plan.get("tesla_target_soc", 80)))
     if not connected:
-        action, title, explanation = "disconnected", "Tesla er ikke tilsluttet", "Der planlægges ingen opladning, før ladekablet forbindes."
+        action, title, explanation = "disconnected", "Tesla er ikke tilsluttet", "Ladeforslaget beregnes på forhånd. Tilslut bilen for at kunne lade i de valgte timer."
     elif car_soc >= target:
         action, title = "stop" if charging else "complete", "Tesla har nået målet"
         explanation = f"Bilen er på {car_soc:.0f} %, og grænsen er {target} %. Shadow Mode ville stoppe opladningen."
     else:
-        future = sorted(float(p["price_dkk_kwh"]) for p in prices if p.get("price_dkk_kwh") is not None)
-        cheap = future[max(0, len(future) // 4 - 1)] if future else None
+        cheap, _ = limits(prices, datetime.now(ZoneInfo("Europe/Copenhagen")))
         price = sample.get("price_dkk")
         home_soc = float(sample.get("soc") or 0)
-        reserve = float(plan.get("minimum_soc_morning", 20))
+        reserve = float((optimization or {}).get("reserve_soc", plan.get("minimum_soc_morning", 20)))
         grid_w = float(sample.get("grid_w") or 0)
         if grid_w < -1000 and home_soc >= reserve + 10:
             action, title = "solar_charge", "Soloverskud kan bruges til Teslaen"
@@ -767,10 +769,21 @@ def tesla_shadow_plan(sample, prices):
             action, title = "wait", "Vent på en billigere time"
             explanation = f"Teslaen er tilsluttet ved {car_soc:.0f} %. Planen holder målet på højst {target} % og prioriterer huset først."
     schedule = tesla_charge_schedule(sample, prices)
+    if connected and car_soc < target:
+        if schedule["status"] != "ready":
+            action, title, explanation = "wait", "Ladeplanen er foreløbig", "Venter på fuldt prisvindue eller tilstrækkelig ladetid."
+        else:
+            now = datetime.now(ZoneInfo("Europe/Copenhagen"))
+            selected_now = any(datetime.fromisoformat(r["time"]) <= now < datetime.fromisoformat(r["end"])
+                               for r in schedule["selected_hours"])
+            action = "grid_charge" if selected_now else "wait"
+            title = "Valgt ladetid nu" if selected_now else "Vent til den valgte ladetid"
+            explanation = "Netprisplanen er beregnet frem til afgang. Batteribidrag vurderes separat ud fra husreserven."
     return {"action": action, "title": title, "explanation": explanation,
             "connected": connected, "charging": charging, "soc": car_soc,
             "target_soc": target, "departure_time": plan.get("tesla_departure_time", "07:00"),
             "charge_schedule": schedule,
+            "dynamic_reserve": (optimization or {}).get("dynamic_reserve"),
             "read_only": True}
 
 
@@ -786,7 +799,7 @@ def tesla_energy_today():
     start_utc = start_local.astimezone(timezone.utc).isoformat()
     with db() as conn:
         rows = conn.execute(
-            "SELECT created,tesla_charger_power_kw,tesla_charging_state FROM samples "
+            "SELECT * FROM samples "
             "WHERE created>=? AND tesla_charger_power_kw IS NOT NULL ORDER BY id",
             (start_utc,),
         ).fetchall()
@@ -795,11 +808,17 @@ def tesla_energy_today():
     for row in rows:
         try:
             stamp = datetime.fromisoformat(row["created"])
-            power_kw = max(0.0, float(row["tesla_charger_power_kw"] or 0))
+            power_kw = validated_tesla_power(dict(row))
+            if power_kw is None:
+                previous = None
+                continue
         except (TypeError, ValueError):
             continue
         if previous is not None:
-            seconds = max(0.0, min(300.0, (stamp - previous[0]).total_seconds()))
+            seconds = (stamp - previous[0]).total_seconds()
+            if not 0 < seconds <= 120:
+                previous = (stamp, power_kw, row["tesla_charging_state"])
+                continue
             charging = (str(row["tesla_charging_state"] or "").lower() == "charging" or
                         str(previous[2] or "").lower() == "charging")
             if charging or power_kw > 0.05 or previous[1] > 0.05:
@@ -845,7 +864,7 @@ def collect_sample():
         "price_dkk": current_price(prices), "solar_tomorrow": solar_tomorrow,
         "market_error": market_error,
     }
-    for key in TESLA_ENTITIES:
+    for key in [*TESLA_ENTITIES, "tesla_power_updated"]:
         sample[key] = tesla.get(key)
     action, title, explanation, details = planner(sample, prices, weather)
     with db() as conn:
@@ -854,7 +873,7 @@ def collect_sample():
             "load_w", "pv_w", "pv1_w", "pv2_w", "battery_charge_today",
             "battery_discharge_today", "grid_import_today", "grid_export_today", "load_today",
             "pv_today", "reg117", "reg141", "reg142", "reg145", "reg146", "tou_json",
-            "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(),
+            "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(), "tesla_power_updated",
         ]
         values = [json.dumps(sample["tou"]) if key == "tou_json" else sample.get(key) for key in columns]
         conn.execute(
@@ -879,8 +898,10 @@ def dashboard_data():
     prices, weather = market_data()
     if sample_data:
         sample_data["tesla_energy_today_kwh"] = tesla_energy_today()
-    return {"sample": sample_data, **market, "optimization": optimization_plan(sample_data, prices, weather),
-            "tesla_shadow": tesla_shadow_plan(sample_data, prices),
+    optimization = optimization_plan(sample_data, prices, weather)
+    return {"sample": sample_data, **market, "optimization": optimization,
+            "last_tesla_reminder": last_tesla_reminder(),
+            "tesla_shadow": tesla_shadow_plan(sample_data, prices, optimization),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
             "read_only": True, "automatic_writes": False}
 
@@ -920,6 +941,8 @@ def analysis_package(days=7):
         "decisions.json": decisions,
         "market_and_forecast.json": market,
         "optimization_plan_48h.json": optimization,
+        "tesla_shadow.json": tesla_shadow_plan(samples[-1] if samples else None, prices, optimization),
+        "tesla_reminder.json": last_tesla_reminder(),
     }
     if SNAPSHOT_FILE.exists():
         try: files["last_register_snapshot.json"] = json.loads(SNAPSHOT_FILE.read_text())
