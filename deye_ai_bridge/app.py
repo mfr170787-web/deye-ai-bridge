@@ -31,7 +31,8 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.7.3"
+from charge_test import ChargeTest
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from shadow_planning import price_window, limits, reserve, charge_schedule
@@ -105,6 +106,7 @@ def options():
         "slave_id": 1,
         "timeout_seconds": 3,
         "read_only": True,
+        "commissioning_enabled": False,
         "price_area": "DK1",
         "sample_interval_seconds": 60,
         "solar_capacity_kwp": 10,
@@ -942,7 +944,7 @@ def dashboard_data():
             "last_tesla_reminder": last_tesla_reminder(),
             "tesla_shadow": tesla_shadow_plan(sample_data, prices, optimization),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
-            "read_only": True, "automatic_writes": False}
+            "read_only": bool(options()['read_only']), "automatic_writes": False}
 
 
 def analysis_package(days=7):
@@ -970,10 +972,12 @@ def analysis_package(days=7):
         "sample_count": len(samples),
         "decision_count": len(decisions),
         "privacy": "Adgangskoder, tokens, præcis placering og Deye-IP er udeladt.",
-        "read_only": True,
+        "read_only": bool(options()['read_only']),
+        "commissioning_enabled": bool(options().get('commissioning_enabled', False)),
     }
     files = {
         "manifest.json": manifest,
+        "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
         "samples.json": samples,
@@ -1108,6 +1112,28 @@ def snapshot(registers):
             "changes": changes, "registers": registers}
 
 
+def write_test_register(address, value):
+    # Private commissioning transport; never expose arbitrary register writes.
+    if address not in (108, 128) or type(value) is not int or not 0 <= value <= 240:
+        raise ValueError('Register eller værdi uden for testens område')
+    cfg = options()
+    transaction = int(time.time() * 1000) & 0xffff
+    pdu = struct.pack('>BHHBH', 16, address, 1, 2, value)
+    packet = struct.pack('>HHHB', transaction, 0, len(pdu) + 1, int(cfg['slave_id'])) + pdu
+    with socket.create_connection((str(cfg['deye_host']), int(cfg['deye_port'])), timeout=int(cfg['timeout_seconds'])) as sock:
+        sock.sendall(packet)
+        header = recv_exact(sock, 7)
+        tx, protocol, length, unit = struct.unpack('>HHHB', header)
+        if tx != transaction or protocol != 0 or unit != int(cfg['slave_id']) or not 2 <= length <= 254:
+            raise RuntimeError('Uventet Modbus-skrivesvar')
+        response = recv_exact(sock, length - 1)
+    if response != struct.pack('>BHH', 16, address, 1):
+        raise RuntimeError('Modbus-skrivning blev ikke bekræftet')
+
+
+CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, data, status_code=200):
         payload = json.dumps(data, ensure_ascii=False).encode()
@@ -1120,6 +1146,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/charge-test'):
+                return self.send_json(CHARGE_TEST.view())
             if path.endswith("/api/status"):
                 return self.send_json(status())
             if path.endswith("/api/entities"):
@@ -1168,6 +1196,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/charge-test'):
+                if self.headers.get('X-Deye-Test') != '1':
+                    return self.send_json({'error': 'Manglende test-header'}, 403)
+                if body.get('action') == 'restore':
+                    return self.send_json(CHARGE_TEST.restore())
+                if body.get('action') != 'start':
+                    raise ValueError('Ukendt testhandling')
+                return self.send_json(CHARGE_TEST.start(body))
             if path.endswith("/api/scan"):
                 registers = read_holding(int(body.get("start", 0)), int(body.get("count", 1)))
                 return self.send_json({"registers": registers})
@@ -1194,5 +1230,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    threading.Thread(target=CHARGE_TEST.worker, daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
