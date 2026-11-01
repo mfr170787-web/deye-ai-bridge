@@ -73,7 +73,7 @@ class Charge20Test:
     def restore(self, reason='manual_stop'):
         with self.charge.lock:
             s = self.state()
-            if s.get('status') in ('idle','complete','failed','verifying_restore'):
+            if s.get('status') in ('idle','complete','failed','verifying_restore','settling_restore'):
                 return s
             s['stop_reason'] = s.get('stop_reason') or reason
             s['status']='restoring'
@@ -96,13 +96,15 @@ class Charge20Test:
                             self.charge.write(a,self.BASE[a])
                         actual=self.charge.value(a)
                         self.log(s,'restore_readback',address=a,value=actual)
+                        if actual not in (self.BASE[a], self.TARGET[a]):
+                            raise ValueError('Uventet værdi efter gendannelse ved '+str(a))
                         if actual != self.BASE[a]:
-                            raise ValueError('Gendannelse ikke bekræftet ved '+str(a))
+                            self.log(s, 'restore_pending', address=a, value=actual)
                     except Exception as exc:
                         errors.append(str(exc))
             s['restore_errors']=errors
-            s.update(status='restore_failed' if errors else 'verifying_restore',
-                     restore_started=time.time(), restore_checks=0)
+            s.update(status='restore_failed' if errors else 'settling_restore',
+                     settle_deadline=time.time()+10, restore_started=time.time(), restore_checks=0)
             self.save(s)
             return s
 
@@ -127,22 +129,40 @@ class Charge20Test:
                         raise ValueError('Målt ladeeffekt over testens stopgrænse på 1500 W.')
                 except Exception as exc:
                     self.restore('guard_failed: '+str(exc))
-            elif s.get('status')=='verifying_restore':
+            elif s.get('status') in ('settling_restore', 'verifying_restore', 'restore_failed'):
                 try:
                     if s['endpoint'] != self.charge.endpoint():
                         raise ValueError('Forbindelsen er ændret.')
                     current=self.registers()
                     s.update(current_registers=current, checked_at=time.time())
                     self.log(s,'restore_check',values=current)
-                    if current != s['baseline']:
-                        s.update(status='failed', error='Efterkontrol afviger. Kontrollér 108=10, 128=10, 167=15 manuelt. Ingen automatisk overskrivning.')
+                    # All checks in this phase are read-only; never repeat a write.
+                    if s['status']=='restore_failed':
+                        if current==s['baseline']:
+                            s.update(status='verifying_restore',manual_recovery=True,
+                                     restore_started=time.time(),restore_checks=0,
+                                     error='Udgangspunktet ses igen; efterkontrol kører. Den oprindelige testfejl bevares i rapporten.')
+                    elif s['status']=='settling_restore':
+                        if current==s['baseline']:
+                            s.update(status='verifying_restore',restore_started=time.time(),restore_checks=0)
+                            self.log(s,'baseline_first_observed',values=current)
+                        elif any(current[str(a)] not in (self.BASE[a],self.TARGET[a]) for a in self.BASE):
+                            s.update(status='restore_failed',error='En anden registerværdi er set. Gendan manuelt; ingen automatisk overskrivning.')
+                        elif time.time()>=s['settle_deadline']:
+                            s.update(status='restore_failed',error='Udgangspunktet er ikke bekræftet inden 10 sekunder. Gendan manuelt; ingen nye skrivninger.')
+                    elif current!=s['baseline']:
+                        s.update(status='restore_failed',error='Værdien ændrede sig under efterkontrollen. Gendan manuelt; ingen nye skrivninger.')
                     else:
                         s['restore_checks']+=1
                         s['after']=self.charge.measure()
                         if time.time()-s['restore_started']>=60 and s['restore_checks']>=3:
-                            s.update(status='complete' if s['stop_reason'] in ('expired','manual_stop') else 'failed',finished=time.time())
+                            passed=s['stop_reason'] in ('expired','manual_stop') and not s.get('manual_recovery')
+                            s.update(status='complete' if passed else 'failed',finished=time.time(),
+                                     error=None if passed else 'Testen blev afbrudt, men udgangspunktet er nu bekræftet i mindst 60 sekunder.')
                 except Exception as exc:
-                    s.update(restore_started=time.time(), restore_checks=0,error='Efterkontrol fejlede: '+str(exc))
+                    s.update(restore_started=time.time(),restore_checks=0,error='Efterkontrol fejlede: '+str(exc))
+                    if s['status']=='settling_restore' and time.time()>=s['settle_deadline']:
+                        s['status']='restore_failed'
                 self.save(s)
 
     def view(self):
@@ -150,10 +170,12 @@ class Charge20Test:
             s=self.state()
             status=s.get('status')
             labels={'idle':'Klar til 20 A-test','active':'20 A-TEST KØRER – AFLÆS BEGGE BMS NU',
-                    'restoring':'STOPPER – GENDANNER INDSTILLINGER','verifying_restore':'EFTERKONTROL KØRER',
+                    'restoring':'STOPPER – GENDANNER INDSTILLINGER','settling_restore':'AFVENTER TILBAGELÆSNING – HØJST 10 SEKUNDER','verifying_restore':'EFTERKONTROL KØRER',
                     'restore_failed':'GENDANNELSE FEJLEDE – KONTROLLÉR MANUELT','failed':'TEST AFBRUDT','complete':'20 A-TEST AFSLUTTET'}
             if status=='active':
                 progress=min(65,int(max(0,time.time()-s['started'])/120*65))
+            elif status=='settling_restore':
+                progress=65
             elif status=='verifying_restore':
                 progress=min(99,65+int(max(0,time.time()-s['restore_started'])/60*35))
             else:
