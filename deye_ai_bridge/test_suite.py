@@ -32,7 +32,7 @@ class TestSuite:
 
     def start(self, body):
         with self.charge.lock:
-            if self.busy():
+            if self.busy() or getattr(self, 'other_busy', lambda: False)():
                 raise ValueError('Et samlet testforløb er allerede i gang.')
             c = self.charge.options()
             if c.get('read_only', True) or not c.get('commissioning_enabled', False):
@@ -188,14 +188,18 @@ class TestSuite:
         s['latest_test'] = {k:v for k,v in self.charge.state().items() if k != 'endpoint'}
         return s
 
-    def worker(self):
+    def worker(self, extra=None):
         if self.charge.state().get('status') not in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
             self.charge.restore("process_restart", "Uafsluttet test fundet ved opstart.")
+        if extra is not None and extra.state().get('status') in ('active', 'restoring'):
+            extra.restore('process_restart')
         while True:
             time.sleep(2)
             try:
                 self.charge.tick()
                 self.tick()
+                if extra is not None:
+                    extra.tick()
             except Exception as exc:
                 with self.charge.lock:
                     if self.busy():
