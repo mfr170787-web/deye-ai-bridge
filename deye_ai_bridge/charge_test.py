@@ -100,10 +100,18 @@ class ChargeTest:
             raise ValueError('SOC-styring, Time of Use og netladning i Time 2 skal være aktiveret.')
         if value(1100) != 0:
             raise ValueError('Remote-styring skal være deaktiveret under SOC-testen.')
-        a, b, c = [value(i) for i in (62, 63, 64)]
+        clock_before = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
+        clock_rows = self.read(62, 3)
+        clock_after = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
+        clock_values = {row['address']: row['uint16'] for row in clock_rows}
+        self.guard_snapshot['registers'].update({str(k): v for k, v in clock_values.items()})
+        self.guard_snapshot['clock_read_seconds'] = (clock_after-clock_before).total_seconds()
+        a, b, c = [clock_values[i] for i in (62, 63, 64)]
         stamp = datetime(2000 + (a >> 8), a & 255, b >> 8, b & 255, c >> 8, c & 255)
-        now = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
-        if abs((stamp - now).total_seconds()) > 60:
+        now = clock_before + (clock_after-clock_before)/2
+        offset = (stamp-now).total_seconds()
+        self.guard_snapshot['clock'] = {'inverter_local': stamp.isoformat(), 'reference_local': now.isoformat(), 'offset_seconds': offset}
+        if abs(offset) > 60:
             raise ValueError('Inverteruret afviger mere end ét minut.')
         start, end = value(149), value(150)
         def minute(v):
