@@ -79,25 +79,30 @@ class ChargeTest:
             except Exception as exc:
                 state['message'] = str(exc)
                 self.save(state)
-                self.restore()
+                self.restore("start_error", str(exc))
                 raise
             return self.view()
 
     def soc_guard(self, seconds):
+        self.guard_snapshot = {'at': time.time(), 'registers': {}}
+        def value(address):
+            v = self.value(address)
+            self.guard_snapshot['registers'][str(address)] = v
+            return v
         # Only the manually verified Time 2 target, never remote SOC or other slots.
-        limits = [self.value(108), self.value(128)]
-        if not all(1 <= v <= 10 for v in limits) or not max(limits) <= self.value(212) <= 500:
+        limits = [value(108), value(128)]
+        if not all(1 <= v <= 10 for v in limits) or not max(limits) <= value(212) <= 500:
             raise ValueError('SOC-test kræver begge ladegrænser på 1–10 A og gyldig BMS-tilladelse.')
-        if self.value(111) != 1 or self.value(146) not in (1, 255) or self.value(173) != 1 or self.value(130) != 1:
+        if value(111) != 1 or value(146) not in (1, 255) or value(173) != 1 or value(130) != 1:
             raise ValueError('SOC-styring, Time of Use og netladning i Time 2 skal være aktiveret.')
-        if self.value(1100) != 0:
+        if value(1100) != 0:
             raise ValueError('Remote-styring skal være deaktiveret under SOC-testen.')
-        a, b, c = [self.value(i) for i in (62, 63, 64)]
+        a, b, c = [value(i) for i in (62, 63, 64)]
         stamp = datetime(2000 + (a >> 8), a & 255, b >> 8, b & 255, c >> 8, c & 255)
         now = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
         if abs((stamp - now).total_seconds()) > 60:
             raise ValueError('Inverteruret afviger mere end ét minut.')
-        start, end = self.value(149), self.value(150)
+        start, end = value(149), value(150)
         def minute(v):
             if not 0 <= v // 100 <= 23 or not 0 <= v % 100 <= 59:
                 raise ValueError('Ugyldigt klokkeslæt i Time 2.')
@@ -105,7 +110,7 @@ class ChargeTest:
         t = stamp.hour * 3600 + stamp.minute * 60 + stamp.second
         if not minute(start) * 60 <= t or t + seconds + 30 >= minute(end) * 60:
             raise ValueError('Testen skal ligge helt inden for Time 2 uden midnatsskift.')
-        soc = self.value(588)
+        soc = value(588)
         if not 15 <= soc < 30:
             raise ValueError('SOC-test kræver batteriets SOC mellem 15 og 29 %.')
 
@@ -119,11 +124,17 @@ class ChargeTest:
         s.setdefault('events', []).append(dict(at=time.time(), action=action, **details))
         s['events'] = s['events'][-100:]
 
-    def restore(self):
+    def restore(self, reason="manual_stop", detail=None):
         with self.lock:
             s = self.state()
             if s.get('status') in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
                 return s
+            if 'restore_reason' not in s:
+                s['restore_reason'] = reason
+                s['restore_detail'] = detail
+                s['guard_snapshot'] = getattr(self, 'guard_snapshot', None)
+                self.event(s, 'restore_requested', reason=reason, detail=detail)
+                self.save(s)
             try:
                 if s['endpoint'] != self.endpoint():
                     raise RuntimeError('Forbindelsen er ændret; gendannelse er blokeret.')
@@ -211,18 +222,18 @@ class ChargeTest:
             elif status == 'active':
                 try:
                     if time.time() >= s['expires']:
-                        self.restore()
+                        self.restore('expired', 'Testens varighed er udløbet.')
                     elif s.get('kind') == 'soc_time2':
                         self.soc_guard(max(0, s['expires'] - time.time()))
-                except Exception:
-                    self.restore()
+                except Exception as exc:
+                    self.restore('guard_failed', str(exc))
             elif status == 'restore_failed':
                 self.restore()
 
     def worker(self):
         # Recover unfinished writes on restart; completed tests are read-only checked.
         if self.state().get('status') not in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
-            self.restore()
+            self.restore('process_restart', 'Uafsluttet test fundet ved opstart.')
         while True:
             time.sleep(2)
             try:
