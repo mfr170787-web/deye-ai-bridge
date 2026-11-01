@@ -31,7 +31,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.3"
+APP_VERSION = "0.7.4"
 from charge_test import ChargeTest
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
@@ -1114,7 +1114,7 @@ def snapshot(registers):
 
 def write_test_register(address, value):
     # Private commissioning transport; never expose arbitrary register writes.
-    if address not in (108, 128) or type(value) is not int or not 0 <= value <= 240:
+    if type(value) is not int or not ((address in (108, 128) and 0 <= value <= 240) or (address == 167 and value in (15, 30))):
         raise ValueError('Register eller værdi uden for testens område')
     cfg = options()
     transaction = int(time.time() * 1000) & 0xffff
