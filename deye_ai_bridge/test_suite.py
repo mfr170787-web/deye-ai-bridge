@@ -83,10 +83,11 @@ class TestSuite:
             return self.view()
 
     def fail(self, s, message):
+        s['failure_test'] = {k:v for k,v in self.charge.state().items() if k != 'endpoint'}
         s.update(status='stopping', error=message,
                  instruction='Forløbet er afbrudt. Gendannelse og efterkontrol forsøges. Kontrollér inverteren ved fejl.')
         self.save(s)
-        self.charge.restore()
+        self.charge.restore("suite_abort", message)
 
     def stop(self):
         with self.charge.lock:
@@ -125,6 +126,9 @@ class TestSuite:
             if c.get('started') != s.get('test_started'):
                 self.fail(s, 'Teststatus er ændret uden for forløbet.')
                 return
+            if c.get('restore_reason') == 'guard_failed':
+                self.fail(s, 'Beskyttelseskontrol afbrød testen: '+str(c.get('restore_detail')))
+                return
             if c.get('status') in ('restore_failed', 'restore_mismatch'):
                 self.fail(s, 'Gendannelsen fejlede eller registeret ændrede sig igen.')
                 return
@@ -132,7 +136,7 @@ class TestSuite:
                 s['samples'].append(self.charge.measure())
                 s['next_sample'] = time.time()+5
             if s['index'] == 3 and c.get('status') == 'active' and time.time()-s['step_started'] >= 30:
-                self.charge.restore()
+                self.charge.restore("planned_stop", "Planlagt stop efter 30 sekunder.")
             if c.get('status') == 'restored':
                 clean = {k:v for k,v in c.items() if k != 'endpoint'}
                 s['results'].append(dict(name=self.NAMES[s['index']], controller=clean,
@@ -162,10 +166,21 @@ class TestSuite:
     def view(self):
         with self.charge.lock:
             s = self.state()
+            c = self.charge.view()
+            completed = len(s.get('results', []))
+            fraction = 0
+            if s.get('status') in ('running', 'restart_active'):
+                duration = 30 if s.get('index') in (0, 1, 3) else 60 if s.get('index') == 2 else 120
+                if c.get('status') == 'active':
+                    fraction = .5 * min(1, max(0, time.time()-s.get('step_started', time.time()))/duration)
+                elif c.get('status') == 'verifying_restore':
+                    fraction = .5 + .5 * min(1, max(0, time.time()-c.get('restore_started', time.time()))/60)
+            progress = 100 if s.get('status') == 'complete' else min(99, int((completed+fraction)/5*100))
             return dict(status=s.get('status'), instruction=s.get('instruction', 'Klar til ét samlet overvåget testforløb.'),
                         step=self.NAMES[s['index']] if 'index' in s else None,
-                        completed=len(s.get('results', [])), error=s.get('error'),
-                        charge_test=self.charge.view())
+                        completed=completed, progress_percent=progress, total_steps=5,
+                        phase='Efterkontrol' if c.get('status') == 'verifying_restore' else 'Test aktiv' if c.get('status') == 'active' else 'Afventer',
+                        error=s.get('error'), charge_test=c)
 
     def report(self):
         s = self.state()
@@ -175,7 +190,7 @@ class TestSuite:
 
     def worker(self):
         if self.charge.state().get('status') not in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
-            self.charge.restore()
+            self.charge.restore("process_restart", "Uafsluttet test fundet ved opstart.")
         while True:
             time.sleep(2)
             try:
