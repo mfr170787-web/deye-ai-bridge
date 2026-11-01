@@ -83,7 +83,10 @@ class ChargeTest:
                 raise
             return self.view()
 
-    def soc_guard(self, seconds):
+    def soc_guard(self, seconds, ceiling=10):
+        # Existing tests retain 10 A; only the separate fixed 20 A test supplies 20.
+        if type(ceiling) is not int or ceiling not in (10, 20):
+            raise ValueError('Kun 10 A eller den særskilte 20 A-test er tilladt.')
         self.guard_snapshot = {'at': time.time(), 'registers': {}}
         def value(address):
             v = self.value(address)
@@ -91,8 +94,8 @@ class ChargeTest:
             return v
         # Only the manually verified Time 2 target, never remote SOC or other slots.
         limits = [value(108), value(128)]
-        if not all(1 <= v <= 10 for v in limits) or not max(limits) <= value(212) <= 500:
-            raise ValueError('SOC-test kræver begge ladegrænser på 1–10 A og gyldig BMS-tilladelse.')
+        if not all(1 <= v <= ceiling for v in limits) or not max(limits) <= value(212) <= 500:
+            raise ValueError(f'SOC-test kræver begge ladegrænser på 1–{ceiling} A og gyldig BMS-tilladelse.')
         if value(111) != 1 or value(146) not in (1, 255) or value(173) != 1 or value(130) != 1:
             raise ValueError('SOC-styring, Time of Use og netladning i Time 2 skal være aktiveret.')
         if value(1100) != 0:
@@ -167,6 +170,8 @@ class ChargeTest:
         # Read only: never chase a value changed after the initial restoration.
         with self.lock:
             s = self.state()
+            if getattr(self, 'observation_paused', lambda: False)():
+                return s
             if s.get('status') not in ('verifying_restore', 'restored', 'restore_mismatch'):
                 return s
             try:
