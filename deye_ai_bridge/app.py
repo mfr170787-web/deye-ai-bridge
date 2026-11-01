@@ -31,8 +31,9 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.5"
+APP_VERSION = "0.7.6"
 from charge_test import ChargeTest
+from test_suite import TestSuite
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from shadow_planning import price_window, limits, reserve, charge_schedule
@@ -977,6 +978,7 @@ def analysis_package(days=7):
     }
     files = {
         "manifest.json": manifest,
+        "test_suite.json": TEST_SUITE.report(),
         "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
@@ -1134,6 +1136,9 @@ def write_test_register(address, value):
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
 
 
+TEST_SUITE = TestSuite(DATA_DIR / 'test_suite.json', CHARGE_TEST)
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, data, status_code=200):
         payload = json.dumps(data, ensure_ascii=False).encode()
@@ -1146,6 +1151,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/test-suite/report'):
+                payload = json.dumps(TEST_SUITE.report(), ensure_ascii=False, indent=2).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Disposition', 'attachment; filename=deye-test-rapport.json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            if path.endswith('/api/test-suite'):
+                return self.send_json(TEST_SUITE.view())
             if path.endswith('/api/charge-test'):
                 return self.send_json(CHARGE_TEST.view())
             if path.endswith("/api/status"):
@@ -1196,7 +1212,16 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/test-suite'):
+                if self.headers.get('X-Deye-Test') != '1':
+                    return self.send_json({'error': 'Manglende test-header'}, 403)
+                actions = {'start': lambda: TEST_SUITE.start(body), 'stop': TEST_SUITE.stop, 'restart': TEST_SUITE.begin_restart}
+                if body.get('action') not in actions:
+                    raise ValueError('Ukendt testhandling')
+                return self.send_json(actions[body['action']]())
             if path.endswith('/api/charge-test'):
+                if TEST_SUITE.busy():
+                    raise ValueError('Brug Stop samlet test under det samlede forløb.')
                 if self.headers.get('X-Deye-Test') != '1':
                     return self.send_json({'error': 'Manglende test-header'}, 403)
                 if body.get('action') == 'restore':
@@ -1230,6 +1255,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
-    threading.Thread(target=CHARGE_TEST.worker, daemon=True).start()
+    threading.Thread(target=TEST_SUITE.worker, daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
