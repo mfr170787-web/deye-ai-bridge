@@ -31,7 +31,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.8"
+APP_VERSION = "0.7.9"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
