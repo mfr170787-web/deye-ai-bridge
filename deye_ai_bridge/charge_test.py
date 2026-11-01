@@ -73,6 +73,7 @@ class ChargeTest:
                 actual = self.value(address)
                 if actual != requested:
                     raise RuntimeError('Tilbagelæsning matcher ikke testværdien.')
+                self.event(state, 'test_readback', value=actual)
                 state.update(verified=actual, message='Testværdi tilbagelæst. Kontrollér den målte effekt.')
                 self.save(state)
             except Exception as exc:
@@ -114,30 +115,86 @@ class ChargeTest:
         return {'voltage_v': rows[587]['uint16'] / 100, 'soc': rows[588]['uint16'],
                 'battery_w': w, 'charging_w': max(0, -w), 'measured_at': time.time()}
 
+    def event(self, s, action, **details):
+        s.setdefault('events', []).append(dict(at=time.time(), action=action, **details))
+        s['events'] = s['events'][-100:]
+
     def restore(self):
         with self.lock:
             s = self.state()
-            if s.get('status') in ('idle', 'restored'):
+            if s.get('status') in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
                 return s
             try:
                 if s['endpoint'] != self.endpoint():
                     raise RuntimeError('Forbindelsen er ændret; gendannelse er blokeret.')
                 current = self.value(s['address'])
+                self.event(s, 'restore_read', value=current)
                 if current not in (s['requested'], s['original']):
-                    raise RuntimeError('En anden styring har ændret værdien. Kontrollér inverteren manuelt; ingen overskrivning.')
+                    s['status'] = 'restore_mismatch'
+                    raise RuntimeError('Værdien er ændret. Kontrollér inverteren manuelt; ingen overskrivning.')
                 if current != s['original']:
+                    self.event(s, 'restore_write', value=s['original'])
+                    self.save(s)
                     self.write(s['address'], s['original'])
-                if self.value(s['address']) != s['original']:
+                actual = self.value(s['address'])
+                self.event(s, 'restore_readback', value=actual)
+                s['current_register'] = actual
+                s['register_checked_at'] = time.time()
+                if actual != s['original']:
                     raise RuntimeError('Gendannelse kunne ikke bekræftes.')
-                s.update(status='restored', message='Oprindelig indstilling gendannet og tilbagelæst.')
+                s.update(status='verifying_restore', restore_started=time.time(),
+                         restore_checks=1, message='Oprindelig værdi tilbagelæst én gang. Kontrolleres i 60 sekunder; endnu ikke godkendt.')
             except Exception as exc:
-                s.update(status='restore_failed', message=str(exc))
+                if s.get('status') != 'restore_mismatch':
+                    s['status'] = 'restore_failed'
+                s['message'] = str(exc)
+                self.event(s, 'restore_error', error=str(exc))
+            self.save(s)
+            return s
+
+    def check_restore(self):
+        # Read only: never chase a value changed after the initial restoration.
+        with self.lock:
+            s = self.state()
+            if s.get('status') not in ('verifying_restore', 'restored', 'restore_mismatch'):
+                return s
+            try:
+                if s['endpoint'] != self.endpoint():
+                    raise RuntimeError('Forbindelsen er ændret; kontrol afventer.')
+                actual = self.value(s['address'])
+                s.update(current_register=actual, register_checked_at=time.time())
+                if actual != s['original']:
+                    s.update(status='restore_mismatch', message='Efterkontrol: registeret matcher ikke den oprindelige værdi. Ingen automatisk overskrivning. Gendan manuelt og læs igen.')
+                    self.event(s, 'restore_mismatch', value=actual)
+                elif s['status'] == 'restore_mismatch':
+                    s.update(status='verifying_restore', restore_started=time.time(), restore_checks=1,
+                             message='Oprindelig værdi ses igen. Ny efterkontrol i 60 sekunder.')
+                    self.event(s, 'manual_restore_seen', value=actual)
+                elif s['status'] == 'restored' and 'restore_started' not in s:
+                    s.update(status='verifying_restore', restore_started=time.time(), restore_checks=1,
+                             message='Ældre teststatus kontrolleres på ny i 60 sekunder.')
+                elif s['status'] == 'verifying_restore':
+                    s['restore_checks'] += 1
+                    self.event(s, 'restore_check', value=actual)
+                    if time.time() - s['restore_started'] >= 60 and s['restore_checks'] >= 3:
+                        s.update(status='restored', restored_at=time.time(),
+                                 message='Oprindelig værdi bekræftet ved gentagne aflæsninger over mindst 60 sekunder. Dette bekræfter registeret, ikke ladeeffektens stop.')
+                s.pop('register_check_error', None)
+            except Exception as exc:
+                s['register_check_error'] = str(exc)
+                # A failed read breaks the continuous verification interval.
+                if s['status'] == 'verifying_restore':
+                    s.update(restore_started=time.time(), restore_checks=0)
+                elif s['status'] == 'restored':
+                    s.update(status='verifying_restore', restore_started=time.time(), restore_checks=0,
+                             message='Aktuel registerkontrol fejlede; gendannelse er ikke længere bekræftet.')
+                self.event(s, 'check_error', error=str(exc))
             self.save(s)
             return s
 
     def view(self):
         with self.lock:
-            s = self.state()
+            s = self.check_restore()
             s['enabled'] = not self.options().get('read_only', True) and self.options().get('commissioning_enabled', False)
             try:
                 s['measurement'] = self.measure()
@@ -145,19 +202,31 @@ class ChargeTest:
                 s['measurement_error'] = str(exc)
             return s
 
+    def tick(self):
+        with self.lock:
+            s = self.state()
+            status = s.get('status')
+            if status in ('verifying_restore', 'restore_mismatch'):
+                self.check_restore()
+            elif status == 'active':
+                try:
+                    if time.time() >= s['expires']:
+                        self.restore()
+                    elif s.get('kind') == 'soc_time2':
+                        self.soc_guard(max(0, s['expires'] - time.time()))
+                except Exception:
+                    self.restore()
+            elif status == 'restore_failed':
+                self.restore()
+
     def worker(self):
-        # On process restart, recover any unfinished test immediately.
-        if self.state().get('status') not in ('idle', 'restored'):
+        # Recover unfinished writes on restart; completed tests are read-only checked.
+        if self.state().get('status') not in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
             self.restore()
         while True:
             time.sleep(2)
-            with self.lock:
-                s = self.state()
-                if s.get('status') == 'active' and s.get('kind') == 'soc_time2':
-                    try:
-                        self.soc_guard(max(0, s['expires'] - time.time()))
-                    except Exception:
-                        self.restore()
-                        continue
-                if s.get('status') == 'restore_failed' or (s.get('status') == 'active' and time.time() >= s['expires']):
-                    self.restore()
+            try:
+                self.tick()
+            except Exception:
+                # A transient read or disk failure must not kill the recovery worker.
+                continue
