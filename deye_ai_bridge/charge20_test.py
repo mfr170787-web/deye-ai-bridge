@@ -128,6 +128,8 @@ class Charge20Test:
                     if m['charging_w']>1500:
                         raise ValueError('Målt ladeeffekt over testens stopgrænse på 1500 W.')
                 except Exception as exc:
+                    s['guard_snapshot'] = getattr(self.charge, 'guard_snapshot', None)
+                    self.save(s)
                     self.restore('guard_failed: '+str(exc))
             elif s.get('status') in ('settling_restore', 'verifying_restore', 'restore_failed'):
                 try:
