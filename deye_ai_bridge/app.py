@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from contextlib import contextmanager
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,7 +33,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.9"
+APP_VERSION = "0.7.10"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -231,43 +233,80 @@ def tesla_state():
     return result
 
 
+
+MODBUS_LOCK = threading.Lock()
+MODBUS_DIAGNOSTIC_LOCK = threading.Lock()
+MODBUS_ERRORS = deque(maxlen=200)
+
+
+def modbus_diagnostics():
+    with MODBUS_DIAGNOSTIC_LOCK:
+        return {"scope": "Denne Bridge-proces siden genstart; andre klienter er ikke omfattet",
+                "errors": list(MODBUS_ERRORS)}
+
+
+@contextmanager
+def modbus_operation(operation, start=None, count=None):
+    # Bound queue waits; never retry a potentially accepted write.
+    started = time.monotonic()
+    acquired = False
+    try:
+        acquired = MODBUS_LOCK.acquire(timeout=max(1, int(options()["timeout_seconds"])))
+        if not acquired:
+            raise TimeoutError("Modbus-køens ventetid blev overskredet")
+        yield
+    except Exception as exc:
+        stamp = datetime.now(timezone.utc).isoformat()
+        entry = {"at_utc": stamp, "operation": operation, "start": start,
+                 "count": count, "duration_ms": round((time.monotonic()-started)*1000),
+                 "error_type": type(exc).__name__}
+        # No host, credentials, payloads, or arbitrary exception text in exports.
+        with MODBUS_DIAGNOSTIC_LOCK:
+            MODBUS_ERRORS.append(entry)
+        raise RuntimeError(f"Modbus {operation}, register {start}, antal {count}, {stamp}: {type(exc).__name__}: {exc}") from exc
+    finally:
+        if acquired:
+            MODBUS_LOCK.release()
+
+
 def read_holding(start, count):
-    cfg = options()
-    if count < 1 or count > 125 or start < 0 or start > 65535 or start + count > 65536:
-        raise ValueError("Ugyldigt registerområde")
-    transaction = int(time.time() * 1000) & 0xFFFF
-    pdu = struct.pack(">BHH", 3, start, count)
-    packet = struct.pack(">HHHB", transaction, 0, len(pdu) + 1, int(cfg["slave_id"])) + pdu
-    with socket.create_connection(
-        (str(cfg["deye_host"]), int(cfg["deye_port"])),
-        timeout=int(cfg["timeout_seconds"]),
-    ) as sock:
-        sock.sendall(packet)
-        header = recv_exact(sock, 7)
-        rx_transaction, protocol, length, unit = struct.unpack(">HHHB", header)
-        body = recv_exact(sock, length - 1)
-    if rx_transaction != transaction or protocol != 0 or unit != int(cfg["slave_id"]):
-        raise RuntimeError("Uventet Modbus-svar")
-    function = body[0]
-    if function & 0x80:
-        raise RuntimeError("Modbus-fejl kode %d" % body[1])
-    if function != 3 or body[1] != count * 2:
-        raise RuntimeError("Ugyldig Modbus-svarlængde")
-    values = list(struct.unpack(">" + "H" * count, body[2:]))
-    result = []
-    for i, v in enumerate(values):
-        address = start + i
-        signed_value = v - 65536 if v > 32767 else v
-        item = {"address": address, "uint16": v, "int16": signed_value, "hex": "0x%04X" % v}
-        if address in REGISTER_MAP:
-            name, unit, scale, signed = REGISTER_MAP[address]
-            raw = signed_value if signed else v
-            item.update({"name": name, "unit": unit, "scale": scale,
-                         "value": round(raw * scale, 3), "known": True})
-        else:
-            item.update({"name": "Ukendt", "unit": "", "scale": 1, "value": v, "known": False})
-        result.append(item)
-    return result
+    with modbus_operation("read", start, count):
+        cfg = options()
+        if count < 1 or count > 125 or start < 0 or start > 65535 or start + count > 65536:
+            raise ValueError("Ugyldigt registerområde")
+        transaction = int(time.time() * 1000) & 0xFFFF
+        pdu = struct.pack(">BHH", 3, start, count)
+        packet = struct.pack(">HHHB", transaction, 0, len(pdu) + 1, int(cfg["slave_id"])) + pdu
+        with socket.create_connection(
+            (str(cfg["deye_host"]), int(cfg["deye_port"])),
+            timeout=int(cfg["timeout_seconds"]),
+        ) as sock:
+            sock.sendall(packet)
+            header = recv_exact(sock, 7)
+            rx_transaction, protocol, length, unit = struct.unpack(">HHHB", header)
+            body = recv_exact(sock, length - 1)
+        if rx_transaction != transaction or protocol != 0 or unit != int(cfg["slave_id"]):
+            raise RuntimeError("Uventet Modbus-svar")
+        function = body[0]
+        if function & 0x80:
+            raise RuntimeError("Modbus-fejl kode %d" % body[1])
+        if function != 3 or body[1] != count * 2:
+            raise RuntimeError("Ugyldig Modbus-svarlængde")
+        values = list(struct.unpack(">" + "H" * count, body[2:]))
+        result = []
+        for i, v in enumerate(values):
+            address = start + i
+            signed_value = v - 65536 if v > 32767 else v
+            item = {"address": address, "uint16": v, "int16": signed_value, "hex": "0x%04X" % v}
+            if address in REGISTER_MAP:
+                name, unit, scale, signed = REGISTER_MAP[address]
+                raw = signed_value if signed else v
+                item.update({"name": name, "unit": unit, "scale": scale,
+                             "value": round(raw * scale, 3), "known": True})
+            else:
+                item.update({"name": "Ukendt", "unit": "", "scale": 1, "value": v, "known": False})
+            result.append(item)
+        return result
 
 
 def energy_plan():
@@ -979,6 +1018,7 @@ def analysis_package(days=7):
     }
     files = {
         "manifest.json": manifest,
+        "modbus_diagnostics.json": modbus_diagnostics(),
         "charge20_test.json": TWENTY_TEST.report(),
         "test_suite.json": TEST_SUITE.report(),
         "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
@@ -1088,7 +1128,7 @@ def status():
     except Exception as exc:
         result["home_assistant"] = "fejl: " + str(exc)
     try:
-        with socket.create_connection((str(cfg["deye_host"]), int(cfg["deye_port"])), timeout=2):
+        with modbus_operation("probe"), socket.create_connection((str(cfg["deye_host"]), int(cfg["deye_port"])), timeout=2):
             pass
         result["deye_tcp"] = "åben"
     except Exception as exc:
@@ -1117,22 +1157,23 @@ def snapshot(registers):
 
 
 def write_test_register(address, value):
-    # Private commissioning transport; never expose arbitrary register writes.
-    if type(value) is not int or not ((address in (108, 128) and 0 <= value <= 240) or (address == 167 and value in (15, 30))):
-        raise ValueError('Register eller værdi uden for testens område')
-    cfg = options()
-    transaction = int(time.time() * 1000) & 0xffff
-    pdu = struct.pack('>BHHBH', 16, address, 1, 2, value)
-    packet = struct.pack('>HHHB', transaction, 0, len(pdu) + 1, int(cfg['slave_id'])) + pdu
-    with socket.create_connection((str(cfg['deye_host']), int(cfg['deye_port'])), timeout=int(cfg['timeout_seconds'])) as sock:
-        sock.sendall(packet)
-        header = recv_exact(sock, 7)
-        tx, protocol, length, unit = struct.unpack('>HHHB', header)
-        if tx != transaction or protocol != 0 or unit != int(cfg['slave_id']) or not 2 <= length <= 254:
-            raise RuntimeError('Uventet Modbus-skrivesvar')
-        response = recv_exact(sock, length - 1)
-    if response != struct.pack('>BHH', 16, address, 1):
-        raise RuntimeError('Modbus-skrivning blev ikke bekræftet')
+    with modbus_operation("write", address, 1):
+        # Private commissioning transport; never expose arbitrary register writes.
+        if type(value) is not int or not ((address in (108, 128) and 0 <= value <= 240) or (address == 167 and value in (15, 30))):
+            raise ValueError('Register eller værdi uden for testens område')
+        cfg = options()
+        transaction = int(time.time() * 1000) & 0xffff
+        pdu = struct.pack('>BHHBH', 16, address, 1, 2, value)
+        packet = struct.pack('>HHHB', transaction, 0, len(pdu) + 1, int(cfg['slave_id'])) + pdu
+        with socket.create_connection((str(cfg['deye_host']), int(cfg['deye_port'])), timeout=int(cfg['timeout_seconds'])) as sock:
+            sock.sendall(packet)
+            header = recv_exact(sock, 7)
+            tx, protocol, length, unit = struct.unpack('>HHHB', header)
+            if tx != transaction or protocol != 0 or unit != int(cfg['slave_id']) or not 2 <= length <= 254:
+                raise RuntimeError('Uventet Modbus-skrivesvar')
+            response = recv_exact(sock, length - 1)
+        if response != struct.pack('>BHH', 16, address, 1):
+            raise RuntimeError('Modbus-skrivning blev ikke bekræftet')
 
 
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
