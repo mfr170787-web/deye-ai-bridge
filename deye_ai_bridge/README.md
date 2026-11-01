@@ -105,3 +105,26 @@ en kort pause i Home Assistants Modbus-polling efter udtrykkelig godkendelse.
 Registerskrivning, eksport til nettet og batterisalg bliver først aktiveret, når registerkortet er
 valideret mod den konkrete inverter og firmware. Register 141 er et bitfelt og må ikke behandles som
 en simpel 0/1-kontakt.
+
+### Samlet overvåget test (0.7.6)
+
+Dette er en brugerstartet test, ikke normal automatisk drift. Copilot skal være slået fra,
+inverteruret korrekt, SOC 15–29 %, register 108 og 128 begge 10 A og Time 2 (167) 15 %.
+Aktivér `commissioning_enabled: true` og `read_only: false`, gem og genstart tilføjelsen.
+
+Åbn **Samlet overvåget test**, bekræft de to felter, og tryk **Start samlet test**.
+Bliv ved inverter og batterier. Fire trin køres automatisk: 108 ved 5 A, 128 ved 5 A,
+SOC 15→30 % med udløb og SOC med stop efter 30 sekunder. Hvert trin gendanner og
+kontrollerer udgangspunktet i mindst 60 sekunder. Målinger gemmes cirka hvert femte sekund.
+
+Når skærmen viser en pause, tryk **Klargør genstartstest** og genstart **kun Deye AI
+Bridge-tilføjelsen** i Home Assistant inden 120 sekunder. Genstart ikke hele HA eller
+inverteren. Åbn siden igen. Den gemte test gendannes og efterkontrolleres automatisk.
+Hvis genstarten ikke registreres, godkendes genstartstesten ikke. Uventet genstart under
+andre trin afbryder forløbet efter gendannelse.
+
+Efter afslutning: Hent **testrapport**, sæt `read_only: true` og
+`commissioning_enabled: false`, gem og genstart. Rapporten indgår også i analysepakken.
+Ved fejl: Ingen nye trin starter. Kontrollér 108=10, 128=10 og 167=15 direkte på
+inverteren og gendan manuelt ved behov. Pi-/netværksfejl kan efterlade testværdier;
+denne test er ikke en hardware-watchdog eller afprøvning af 35 A fasebeskyttelse.
