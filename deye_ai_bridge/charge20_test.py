@@ -46,28 +46,12 @@ class Charge20Test:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
             if not 20 <= self.charge.value(212) <= 500:
                 raise ValueError('Den tilkoblede BMS tillader ikke mindst 20 A.')
-            s = dict(status='active', started=time.time(), expires=time.time()+120,
+            s = dict(status='preparing', started=time.time(), expires=time.time()+120,
                      endpoint=self.charge.endpoint(), baseline=self.registers(),
                      written=[], samples=[], events=[], stop_reason=None,
+                     prepare_index=0, prepare_deadline=time.time()+25,
                      before=self.charge.measure())
             self.save(s)
-            try:
-                for a,v in self.TARGET.items():
-                    # Record possible mutation BEFORE transport, including ambiguous timeouts.
-                    s['written'].append(a)
-                    self.log(s, 'write_requested', address=a, value=v)
-                    self.save(s)
-                    self.charge.write(a,v)
-                    actual=self.charge.value(a)
-                    self.log(s, 'write_readback', address=a, value=actual)
-                    self.save(s)
-                    if actual != v:
-                        raise ValueError('Testværdi kunne ikke bekræftes ved register '+str(a))
-                s['expires']=time.time()+120
-                self.save(s)
-            except Exception as exc:
-                self.restore('start_error: '+str(exc))
-                raise
             return self.view()
 
     def restore(self, reason='manual_stop'):
@@ -90,10 +74,10 @@ class Charge20Test:
                         actual=self.charge.value(a)
                         if actual not in (self.BASE[a],self.TARGET[a]):
                             raise ValueError('Anden værdi ved '+str(a)+'; ingen overskrivning.')
-                        if actual != self.BASE[a]:
-                            self.log(s,'restore_write',address=a,value=self.BASE[a])
-                            self.save(s)
-                            self.charge.write(a,self.BASE[a])
+                        # A stale baseline must not skip cancellation of a journalled write.
+                        self.log(s,'restore_write',address=a,value=self.BASE[a])
+                        self.save(s)
+                        self.charge.write(a,self.BASE[a])
                         actual=self.charge.value(a)
                         self.log(s,'restore_readback',address=a,value=actual)
                         if actual not in (self.BASE[a], self.TARGET[a]):
@@ -111,7 +95,56 @@ class Charge20Test:
     def tick(self):
         with self.charge.lock:
             s=self.state()
-            if s.get('status')=='active':
+            if s.get('status')=='preparing':
+                try:
+                    if s['endpoint'] != self.charge.endpoint():
+                        raise ValueError('Forbindelsen er ændret.')
+                    cfg=self.charge.options()
+                    if cfg.get('read_only',True) or not cfg.get('commissioning_enabled',False):
+                        raise ValueError('Skrivning slået fra under klargøring.')
+                    if time.time()>=s['expires']:
+                        raise ValueError('Testens samlede tidsgrænse er nået under klargøring.')
+                    self.charge.soc_guard(max(0,s['expires']-time.time()),ceiling=20)
+                    m=self.charge.measure()
+                    if m['charging_w']>1500:
+                        raise ValueError('Målt ladeeffekt over 1500 W under klargøring.')
+                    current=self.registers()
+                    keys=list(self.TARGET)
+                    index=s['prepare_index']
+                    address=keys[index]
+                    # Only baseline or the journalled test value is acceptable.
+                    if any(current[str(a)] not in (self.BASE[a],self.TARGET[a]) or
+                           (a not in s['written'] and current[str(a)]!=self.BASE[a])
+                           for a in self.BASE):
+                        raise ValueError('Uventet registerværdi under klargøring.')
+                    if address not in s['written']:
+                        s['written'].append(address)
+                        self.log(s,'write_requested',address=address,value=self.TARGET[address])
+                        s.update(prepare_deadline=time.time()+25,confirm_started=None,confirm_checks=0)
+                        self.save(s)  # Intent is durable before the sole write attempt.
+                        self.charge.write(address,self.TARGET[address])
+                        return
+                    expected={str(a):(self.TARGET[a] if a in s['written'] else self.BASE[a]) for a in self.BASE}
+                    self.log(s,'prepare_readback',values=current)
+                    if current==expected:
+                        if s.get('confirm_started') is None:
+                            s.update(confirm_started=time.time(),confirm_checks=0)
+                        s['confirm_checks']+=1
+                        if time.time()-s['confirm_started']>=10 and s['confirm_checks']>=3:
+                            if index==len(keys)-1:
+                                s.update(status='active',active_started=time.time())
+                            else:
+                                s.update(prepare_index=index+1,confirm_started=None,confirm_checks=0)
+                    else:
+                        s.update(confirm_started=None,confirm_checks=0)
+                    if s['status']=='preparing' and time.time()>=s['prepare_deadline']:
+                        raise ValueError('Stabil testværdi ikke bekræftet inden 25 sekunder ved '+str(address))
+                    self.save(s)
+                except Exception as exc:
+                    s['guard_snapshot']=getattr(self.charge,'guard_snapshot',None)
+                    self.save(s)
+                    self.restore('prepare_error: '+str(exc))
+            elif s.get('status')=='active':
                 try:
                     if time.time() >= s['expires']:
                         self.restore('expired')
@@ -171,10 +204,12 @@ class Charge20Test:
         with self.charge.lock:
             s=self.state()
             status=s.get('status')
-            labels={'idle':'Klar til 20 A-test','active':'20 A-TEST KØRER – AFLÆS BEGGE BMS NU',
+            labels={'preparing':'KLARGØRER – BEKRÆFTER STABILE TESTVÆRDIER','idle':'Klar til 20 A-test','active':'20 A-TEST KØRER – AFLÆS BEGGE BMS NU',
                     'restoring':'STOPPER – GENDANNER INDSTILLINGER','settling_restore':'AFVENTER TILBAGELÆSNING – HØJST 10 SEKUNDER','verifying_restore':'EFTERKONTROL KØRER',
                     'restore_failed':'GENDANNELSE FEJLEDE – KONTROLLÉR MANUELT','failed':'TEST AFBRUDT','complete':'20 A-TEST AFSLUTTET'}
-            if status=='active':
+            if status=='preparing':
+                progress=min(30,s.get('prepare_index',0)*10)
+            elif status=='active':
                 progress=min(65,int(max(0,time.time()-s['started'])/120*65))
             elif status=='settling_restore':
                 progress=65
