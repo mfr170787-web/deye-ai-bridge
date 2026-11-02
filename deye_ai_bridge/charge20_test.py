@@ -41,12 +41,15 @@ class Charge20Test:
                 raise ValueError('Kræver read_only: false og commissioning_enabled: true.')
             if any(body.get(k) is not True for k in ('copilot_off', 'supervised', 'both_packs_ready')):
                 raise ValueError('Bekræft Copilot slået fra, overvågning og adgang til begge BMS-appvisninger.')
-            self.charge.soc_guard(120)
+            seconds = body.get("seconds", 120)
+            if type(seconds) is not int or seconds not in (120, 600):
+                raise ValueError("Vælg en test på 120 eller 600 sekunder.")
+            self.charge.soc_guard(seconds)
             if self.registers() != {str(a):v for a,v in self.BASE.items()}:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
             if not 90 <= self.charge.value(212) <= 500:
                 raise ValueError('Den tilkoblede BMS tillader ikke mindst 90 A.')
-            s = dict(status='preparing', started=time.time(), expires=time.time()+120,
+            s = dict(status='preparing', started=time.time(), expires=time.time()+seconds, duration_seconds=seconds,
                      endpoint=self.charge.endpoint(), baseline=self.registers(),
                      written=[], samples=[], events=[], stop_reason=None,
                      test_current_a=90, target={str(a):v for a,v in self.TARGET.items()},
@@ -215,7 +218,7 @@ class Charge20Test:
             if status=='preparing':
                 progress=min(30,s.get('prepare_index',0)*10)
             elif status=='active':
-                progress=min(65,int(max(0,time.time()-s['started'])/120*65))
+                progress=min(65,int(max(0,time.time()-s['started'])/s.get('duration_seconds',120)*65))
             elif status=='settling_restore':
                 progress=65
             elif status=='verifying_restore':
@@ -224,6 +227,8 @@ class Charge20Test:
                 progress=100 if status=='complete' else 0
             return dict(status=status, headline=labels.get(status,status).replace('90 A',str(s.get('test_current_a',90 if status=='idle' else 20))+' A'),progress_percent=progress,
                         instruction='Under opladning: tag et billede af hver BMS med strøm, spænding og temperatur. Bridge kan kun se den tilkoblede BMS. Efter testen: hent rapporten, slå skrivning fra og genstart. Ved fejl kontrolleres 108=10, 128=10 og 167=15 manuelt.',
+                        duration_seconds=s.get('duration_seconds',120),
+                        remaining_seconds=max(0,int(s.get('expires',time.time())-time.time())) if status in ('preparing','active') else None,
                         stop_reason=s.get('stop_reason'), error=s.get('error'),restore_errors=s.get('restore_errors'),
                         latest=s.get('after') or (s.get('samples') or [s.get('before')])[-1],
                         current_registers=s.get('current_registers'))
