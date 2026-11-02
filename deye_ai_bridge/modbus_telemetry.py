@@ -1,5 +1,6 @@
 """Read-only interpretation of Deye V105-family registers, with raw evidence."""
 from datetime import datetime
+from contextlib import contextmanager
 
 
 REGISTERS = {
@@ -104,3 +105,77 @@ def decode(raw, clock_reference=None, errors=None):
         'ev': {'mode_raw':get(259),'max_power_raw':get(260),'scale_verified':False},
         'read_only':True,
     }
+
+
+class ClockDiagnostics:
+    """Persistent, bounded read-only clock evidence; never corrects or filters the clock."""
+    def __init__(self, path, read):
+        import threading
+        self.path, self.read = path, read
+        self.lock = threading.RLock()
+        self.last_error = None
+        self.running = False
+
+    @contextmanager
+    def connection(self):
+        import sqlite3
+        db = sqlite3.connect(str(self.path), timeout=5)
+        db.execute('CREATE TABLE IF NOT EXISTS clock_samples (id INTEGER PRIMARY KEY, at REAL, payload TEXT, anomaly INTEGER)')
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def sample(self, source='monitor'):
+        import time
+        import json
+        from zoneinfo import ZoneInfo
+        before = datetime.now(ZoneInfo('Europe/Copenhagen'))
+        record = {'source': source, 'at': before.timestamp()}
+        try:
+            rows = self.read(62, 3)
+            after = datetime.now(ZoneInfo('Europe/Copenhagen'))
+            raw = {r['address']: r['uint16'] for r in rows}
+            record.update(raw_registers={str(k): v for k,v in raw.items()},
+                          read_seconds=(after-before).total_seconds(),
+                          clock=decode(raw, before+(after-before)/2)['clock'])
+            record['anomaly'] = record['clock']['error'] is not None or abs(record['clock']['offset_seconds'] or 0)>60
+        except Exception as exc:
+            record.update(error=str(exc), anomaly=True)
+        with self.lock:
+            with self.connection() as db:
+                db.execute('INSERT INTO clock_samples(at,payload,anomaly) VALUES (?,?,?)', (record['at'], json.dumps(record), int(record['anomaly'])))
+                db.execute('DELETE FROM clock_samples WHERE at < ?', (time.time()-86400,))
+                db.execute('DELETE FROM clock_samples WHERE id <= (SELECT id FROM clock_samples ORDER BY id DESC LIMIT 1 OFFSET 19999)')
+            self.last_error = record.get('error')
+        return record
+
+    def report(self, include_samples=True):
+        import json
+        with self.lock:
+            with self.connection() as db:
+                count, anomalies = db.execute('SELECT COUNT(*),COALESCE(SUM(anomaly),0) FROM clock_samples').fetchone()
+                rows = db.execute('SELECT payload FROM clock_samples ORDER BY id' if include_samples else 'SELECT payload FROM clock_samples ORDER BY id DESC LIMIT 1').fetchall()
+            records = [json.loads(r[0]) for r in rows]
+            result = dict(running=self.running, interval_seconds=5, retention_hours=24,
+                          count=count, anomaly_count=anomalies,
+                          latest=records[-1] if records else None, error=self.last_error,
+                          note='Kun aflæsning af 62–64. Afvigelser over 60 sekunder udløser to ekstra aflæsninger; ingen tidskorrektion eller ændring af testens stopkontrol. Data bevares over genstart i op til 24 timer, højst 20000 aflæsninger.')
+            if include_samples:
+                result['samples'] = records
+            return result
+
+    def worker(self):
+        import time
+        self.running = True
+        while True:
+            try:
+                record = self.sample()
+                if record['anomaly']:
+                    for _ in range(2):
+                        time.sleep(.5)
+                        self.sample('anomaly_followup')
+            except Exception as exc:
+                self.last_error = str(exc)
+            time.sleep(5)
