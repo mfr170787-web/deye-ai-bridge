@@ -191,7 +191,7 @@ class TestSuite:
     def worker(self, extra=None):
         if self.charge.state().get('status') not in ('idle', 'restored', 'verifying_restore', 'restore_mismatch'):
             self.charge.restore("process_restart", "Uafsluttet test fundet ved opstart.")
-        if extra is not None and extra.state().get('status') in ('active', 'restoring'):
+        if extra is not None and extra.state().get('status') in ('preparing', 'active', 'restoring'):
             extra.restore('process_restart')
         while True:
             time.sleep(2)
