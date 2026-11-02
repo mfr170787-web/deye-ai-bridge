@@ -83,7 +83,7 @@ class ChargeTest:
                 raise
             return self.view()
 
-    def soc_guard(self, seconds, ceiling=10):
+    def soc_guard(self, seconds, ceiling=10, recover_clock=False):
         # Existing tests retain 10 A; only the separate fixed 90 A test supplies 90.
         if type(ceiling) is not int or ceiling not in (10, 90):
             raise ValueError('Kun 10 A eller den særskilte 90 A-test er tilladt.')
@@ -100,27 +100,55 @@ class ChargeTest:
             raise ValueError('SOC-styring, Time of Use og netladning i Time 2 skal være aktiveret.')
         if value(1100) != 0:
             raise ValueError('Remote-styring skal være deaktiveret under SOC-testen.')
-        clock_before = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
-        clock_rows = self.read(62, 3)
-        clock_after = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
-        clock_values = {row['address']: row['uint16'] for row in clock_rows}
-        self.guard_snapshot['registers'].update({str(k): v for k, v in clock_values.items()})
-        self.guard_snapshot['clock_read_seconds'] = (clock_after-clock_before).total_seconds()
-        a, b, c = [clock_values[i] for i in (62, 63, 64)]
-        stamp = datetime(2000 + (a >> 8), a & 255, b >> 8, b & 255, c >> 8, c & 255)
-        now = clock_before + (clock_after-clock_before)/2
-        offset = (stamp-now).total_seconds()
-        self.guard_snapshot['clock'] = {'inverter_local': stamp.isoformat(), 'reference_local': now.isoformat(), 'offset_seconds': offset}
-        if abs(offset) > 60:
-            raise ValueError('Inverteruret afviger mere end ét minut.')
         start, end = value(149), value(150)
         def minute(v):
             if not 0 <= v // 100 <= 23 or not 0 <= v % 100 <= 59:
                 raise ValueError('Ugyldigt klokkeslæt i Time 2.')
             return v // 100 * 60 + v % 100
-        t = stamp.hour * 3600 + stamp.minute * 60 + stamp.second
-        if not minute(start) * 60 <= t or t + seconds + 30 >= minute(end) * 60:
-            raise ValueError('Testen skal ligge helt inden for Time 2 uden midnatsskift.')
+        def within(stamp):
+            t = stamp.hour * 3600 + stamp.minute * 60 + stamp.second
+            return minute(start)*60 <= t and t+seconds+30 < minute(end)*60
+        attempts = []
+        recovered = False
+        consecutive = 0
+        deadline = time.monotonic()+5
+        for attempt in range(8):
+            if attempt:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(.5)
+            clock_before = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
+            clock_rows = self.read(62, 3)
+            clock_after = datetime.now(ZoneInfo('Europe/Copenhagen')).replace(tzinfo=None)
+            clock_values = {row['address']: row['uint16'] for row in clock_rows}
+            self.guard_snapshot['registers'].update({str(k): v for k, v in clock_values.items()})
+            self.guard_snapshot['clock_read_seconds'] = (clock_after-clock_before).total_seconds()
+            a, b, c = [clock_values[i] for i in (62, 63, 64)]
+            stamp = datetime(2000+(a >> 8), a & 255, b >> 8, b & 255, c >> 8, c & 255)
+            now = clock_before+(clock_after-clock_before)/2
+            offset = (stamp-now).total_seconds()
+            evidence = dict(inverter_local=stamp.isoformat(), reference_local=now.isoformat(), offset_seconds=offset,
+                            raw_registers={str(k):v for k,v in clock_values.items()})
+            attempts.append(evidence)
+            self.guard_snapshot['clock'] = evidence
+            self.guard_snapshot['clock_attempts'] = attempts
+            if not within(stamp) or not within(now):
+                raise ValueError('Testen skal ligge helt inden for Time 2 ved både invertertid og dansk tid.')
+            if abs(offset) <= 60:
+                consecutive += 1
+                if attempt == 0 or consecutive >= 2:
+                    if attempt and time.monotonic() >= deadline:
+                        break
+                    recovered = True
+                    break
+            else:
+                consecutive = 0
+                # Only the observed one-hour-back pattern; never start on a bad clock.
+                if not recover_clock or ceiling != 90 or not -3620 <= offset <= -3590:
+                    raise ValueError('Inverteruret afviger mere end ét minut.')
+        if not recovered:
+            raise ValueError('Inverteruret blev ikke stabilt inden for den korte genaflæsning.')
+        self.guard_snapshot['clock_recovered'] = len(attempts)>1
         soc = value(588)
         if not 15 <= soc < 30:
             raise ValueError('SOC-test kræver batteriets SOC mellem 15 og 29 %.')
