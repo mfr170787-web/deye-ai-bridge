@@ -33,7 +33,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.13"
+APP_VERSION = "0.7.14"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -1202,7 +1202,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.dumps(TWENTY_TEST.report(), ensure_ascii=False, indent=2).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.send_header('Content-Disposition', 'attachment; filename=deye-60a-test.json')
+                self.send_header('Content-Disposition', 'attachment; filename=deye-90a-test.json')
                 self.send_header('Content-Length', str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
