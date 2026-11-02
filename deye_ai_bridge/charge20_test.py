@@ -43,8 +43,8 @@ class Charge20Test:
             if any(body.get(k) is not True for k in ('copilot_off', 'supervised', 'both_packs_ready')):
                 raise ValueError('Bekræft Copilot slået fra, overvågning og adgang til begge BMS-appvisninger.')
             seconds = body.get("seconds", 120)
-            if type(seconds) is not int or seconds not in (120, 600):
-                raise ValueError("Vælg en test på 120 eller 600 sekunder.")
+            if type(seconds) is not int or seconds not in (120, 600, 1800):
+                raise ValueError("Vælg en test på 120, 600 eller 1800 sekunder.")
             self.charge.soc_guard(seconds)
             if self.registers() != {str(a):v for a,v in self.BASE.items()}:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
