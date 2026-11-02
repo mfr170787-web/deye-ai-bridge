@@ -10,6 +10,7 @@ class Charge20Test:
 
     def __init__(self, path, charge):
         self.path, self.charge = path, charge
+        self.monotonic_deadline = None
 
     def state(self):
         return json.loads(self.path.read_text()) if self.path.exists() else {'status': 'idle'}
@@ -49,10 +50,11 @@ class Charge20Test:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
             if not 90 <= self.charge.value(212) <= 500:
                 raise ValueError('Den tilkoblede BMS tillader ikke mindst 90 A.')
+            self.monotonic_deadline = time.monotonic()+seconds
             s = dict(status='preparing', started=time.time(), expires=time.time()+seconds, duration_seconds=seconds,
                      endpoint=self.charge.endpoint(), baseline=self.registers(),
                      written=[], samples=[], events=[], stop_reason=None,
-                     test_current_a=90, target={str(a):v for a,v in self.TARGET.items()},
+                     test_current_a=90, clock_policy='bounded_one_hour_back_recheck', timer_basis='minimum_of_wall_and_process_monotonic_deadline', target={str(a):v for a,v in self.TARGET.items()},
                      prepare_index=0, prepare_deadline=time.time()+25,
                      before=self.charge.measure())
             self.save(s)
@@ -98,6 +100,23 @@ class Charge20Test:
             self.save(s)
             return s
 
+    def remaining(self, s):
+        # A new process cannot resume an active test using a fresh time budget.
+        if self.monotonic_deadline is None:
+            return 0
+        return max(0, min(s['expires']-time.time(), self.monotonic_deadline-time.monotonic()))
+
+    def guarded_time(self, s):
+        try:
+            self.charge.soc_guard(self.remaining(s), ceiling=90, recover_clock=True)
+            if self.remaining(s) <= 0:
+                raise ValueError('Testens tidsgrænse er nået.')
+        finally:
+            evidence = getattr(self.charge, 'guard_snapshot', {})
+            if len(evidence.get('clock_attempts', [])) > 1:
+                self.log(s, 'clock_recheck', evidence=evidence)
+                self.save(s)
+
     def tick(self):
         with self.charge.lock:
             s=self.state()
@@ -108,9 +127,9 @@ class Charge20Test:
                     cfg=self.charge.options()
                     if cfg.get('read_only',True) or not cfg.get('commissioning_enabled',False):
                         raise ValueError('Skrivning slået fra under klargøring.')
-                    if time.time()>=s['expires']:
+                    if self.remaining(s)<=0:
                         raise ValueError('Testens samlede tidsgrænse er nået under klargøring.')
-                    self.charge.soc_guard(max(0,s['expires']-time.time()),ceiling=90)
+                    self.guarded_time(s)
                     if not 90 <= self.charge.value(212) <= 500:
                         raise ValueError('BMS-tilladelsen er under 90 A under klargøring.')
                     m=self.charge.measure()
@@ -154,13 +173,13 @@ class Charge20Test:
                     self.restore('prepare_error: '+str(exc))
             elif s.get('status')=='active':
                 try:
-                    if time.time() >= s['expires']:
+                    if self.remaining(s)<=0:
                         self.restore('expired')
                         return
                     c=self.charge.options()
                     if c.get('read_only',True) or not c.get('commissioning_enabled',False):
                         raise ValueError('Skrivning slået fra under testen.')
-                    self.charge.soc_guard(max(0,s['expires']-time.time()), ceiling=90)
+                    self.guarded_time(s)
                     if self.registers() != {str(a):v for a,v in self.TARGET.items()}:
                         raise ValueError('Testindstillinger er ændret uden for testen.')
                     m=self.charge.measure()
@@ -228,7 +247,7 @@ class Charge20Test:
             return dict(status=status, headline=labels.get(status,status).replace('90 A',str(s.get('test_current_a',90 if status=='idle' else 20))+' A'),progress_percent=progress,
                         instruction='Under opladning: tag et billede af hver BMS med strøm, spænding og temperatur. Bridge kan kun se den tilkoblede BMS. Efter testen: hent rapporten, slå skrivning fra og genstart. Ved fejl kontrolleres 108=10, 128=10 og 167=15 manuelt.',
                         duration_seconds=s.get('duration_seconds',120),
-                        remaining_seconds=max(0,int(s.get('expires',time.time())-time.time())) if status in ('preparing','active') else None,
+                        remaining_seconds=max(0,int(self.remaining(s))) if status in ('preparing','active') else None,
                         stop_reason=s.get('stop_reason'), error=s.get('error'),restore_errors=s.get('restore_errors'),
                         latest=s.get('after') or (s.get('samples') or [s.get('before')])[-1],
                         current_registers=s.get('current_registers'))
