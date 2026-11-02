@@ -84,9 +84,9 @@ class ChargeTest:
             return self.view()
 
     def soc_guard(self, seconds, ceiling=10):
-        # Existing tests retain 10 A; only the separate fixed 60 A test supplies 60.
-        if type(ceiling) is not int or ceiling not in (10, 60):
-            raise ValueError('Kun 10 A eller den særskilte 60 A-test er tilladt.')
+        # Existing tests retain 10 A; only the separate fixed 90 A test supplies 90.
+        if type(ceiling) is not int or ceiling not in (10, 90):
+            raise ValueError('Kun 10 A eller den særskilte 90 A-test er tilladt.')
         self.guard_snapshot = {'at': time.time(), 'registers': {}}
         def value(address):
             v = self.value(address)
