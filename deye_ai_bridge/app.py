@@ -33,10 +33,11 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.15"
+APP_VERSION = "0.7.16"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
+from modbus_telemetry import ClockDiagnostics
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from shadow_planning import price_window, limits, reserve, charge_schedule
@@ -1019,6 +1020,7 @@ def analysis_package(days=7):
     files = {
         "manifest.json": manifest,
         "modbus_diagnostics.json": modbus_diagnostics(),
+        "clock_diagnostics.json": CLOCK_DIAGNOSTICS.report(),
         "charge20_test.json": TWENTY_TEST.report(),
         "test_suite.json": TEST_SUITE.report(),
         "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
@@ -1176,6 +1178,7 @@ def write_test_register(address, value):
             raise RuntimeError('Modbus-skrivning blev ikke bekræftet')
 
 
+CLOCK_DIAGNOSTICS = ClockDiagnostics(DATA_DIR / 'clock_diagnostics.db', read_holding)
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
 
 
@@ -1222,6 +1225,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(TEST_SUITE.view())
             if path.endswith('/api/charge-test'):
                 return self.send_json(CHARGE_TEST.view())
+            if path.endswith("/api/clock-diagnostics"):
+                return self.send_json(CLOCK_DIAGNOSTICS.report(False))
             if path.endswith("/api/status"):
                 return self.send_json(status())
             if path.endswith("/api/entities"):
@@ -1322,6 +1327,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    threading.Thread(target=CLOCK_DIAGNOSTICS.worker, daemon=True).start()
     threading.Thread(target=TEST_SUITE.worker, args=(TWENTY_TEST,), daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
