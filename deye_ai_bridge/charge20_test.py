@@ -1,4 +1,4 @@
-"""Fixed supervised 60 A test; restores all three settings, never overrides BMS."""
+"""Fixed supervised 90 A test; restores all three settings, never overrides BMS."""
 import json
 import os
 import time
@@ -6,7 +6,7 @@ import time
 
 class Charge20Test:
     BASE = {108: 10, 128: 10, 167: 15}
-    TARGET = {108: 60, 128: 60, 167: 30}
+    TARGET = {108: 90, 128: 90, 167: 30}
 
     def __init__(self, path, charge):
         self.path, self.charge = path, charge
@@ -44,12 +44,12 @@ class Charge20Test:
             self.charge.soc_guard(120)
             if self.registers() != {str(a):v for a,v in self.BASE.items()}:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
-            if not 60 <= self.charge.value(212) <= 500:
-                raise ValueError('Den tilkoblede BMS tillader ikke mindst 60 A.')
+            if not 90 <= self.charge.value(212) <= 500:
+                raise ValueError('Den tilkoblede BMS tillader ikke mindst 90 A.')
             s = dict(status='preparing', started=time.time(), expires=time.time()+120,
                      endpoint=self.charge.endpoint(), baseline=self.registers(),
                      written=[], samples=[], events=[], stop_reason=None,
-                     test_current_a=60, target={str(a):v for a,v in self.TARGET.items()},
+                     test_current_a=90, target={str(a):v for a,v in self.TARGET.items()},
                      prepare_index=0, prepare_deadline=time.time()+25,
                      before=self.charge.measure())
             self.save(s)
@@ -107,12 +107,12 @@ class Charge20Test:
                         raise ValueError('Skrivning slået fra under klargøring.')
                     if time.time()>=s['expires']:
                         raise ValueError('Testens samlede tidsgrænse er nået under klargøring.')
-                    self.charge.soc_guard(max(0,s['expires']-time.time()),ceiling=60)
-                    if not 60 <= self.charge.value(212) <= 500:
-                        raise ValueError('BMS-tilladelsen er under 60 A under klargøring.')
+                    self.charge.soc_guard(max(0,s['expires']-time.time()),ceiling=90)
+                    if not 90 <= self.charge.value(212) <= 500:
+                        raise ValueError('BMS-tilladelsen er under 90 A under klargøring.')
                     m=self.charge.measure()
-                    if m['charging_w']>4000:
-                        raise ValueError('Målt ladeeffekt over 4000 W under klargøring.')
+                    if m['charging_w']>5500:
+                        raise ValueError('Målt ladeeffekt over 5500 W under klargøring.')
                     current=self.registers()
                     keys=list(self.TARGET)
                     index=s['prepare_index']
@@ -157,14 +157,14 @@ class Charge20Test:
                     c=self.charge.options()
                     if c.get('read_only',True) or not c.get('commissioning_enabled',False):
                         raise ValueError('Skrivning slået fra under testen.')
-                    self.charge.soc_guard(max(0,s['expires']-time.time()), ceiling=60)
+                    self.charge.soc_guard(max(0,s['expires']-time.time()), ceiling=90)
                     if self.registers() != {str(a):v for a,v in self.TARGET.items()}:
                         raise ValueError('Testindstillinger er ændret uden for testen.')
                     m=self.charge.measure()
                     s['samples'].append(m)
                     self.save(s)
-                    if m['charging_w']>4000:
-                        raise ValueError('Målt ladeeffekt over testens stopgrænse på 4000 W.')
+                    if m['charging_w']>5500:
+                        raise ValueError('Målt ladeeffekt over testens stopgrænse på 5500 W.')
                 except Exception as exc:
                     s['guard_snapshot'] = getattr(self.charge, 'guard_snapshot', None)
                     self.save(s)
@@ -209,9 +209,9 @@ class Charge20Test:
         with self.charge.lock:
             s=self.state()
             status=s.get('status')
-            labels={'preparing':'KLARGØRER – BEKRÆFTER STABILE TESTVÆRDIER','idle':'Klar til 60 A-test','active':'60 A-TEST KØRER – AFLÆS BEGGE BMS NU',
+            labels={'preparing':'KLARGØRER – BEKRÆFTER STABILE TESTVÆRDIER','idle':'Klar til 90 A-test','active':'90 A-TEST KØRER – AFLÆS BEGGE BMS NU',
                     'restoring':'STOPPER – GENDANNER INDSTILLINGER','settling_restore':'AFVENTER TILBAGELÆSNING – HØJST 10 SEKUNDER','verifying_restore':'EFTERKONTROL KØRER',
-                    'restore_failed':'GENDANNELSE FEJLEDE – KONTROLLÉR MANUELT','failed':'TEST AFBRUDT','complete':'60 A-TEST AFSLUTTET'}
+                    'restore_failed':'GENDANNELSE FEJLEDE – KONTROLLÉR MANUELT','failed':'TEST AFBRUDT','complete':'90 A-TEST AFSLUTTET'}
             if status=='preparing':
                 progress=min(30,s.get('prepare_index',0)*10)
             elif status=='active':
@@ -222,7 +222,7 @@ class Charge20Test:
                 progress=min(99,65+int(max(0,time.time()-s['restore_started'])/60*35))
             else:
                 progress=100 if status=='complete' else 0
-            return dict(status=status, headline=labels.get(status,status).replace('60 A',str(s.get('test_current_a',60 if status=='idle' else 20))+' A'),progress_percent=progress,
+            return dict(status=status, headline=labels.get(status,status).replace('90 A',str(s.get('test_current_a',90 if status=='idle' else 20))+' A'),progress_percent=progress,
                         instruction='Under opladning: tag et billede af hver BMS med strøm, spænding og temperatur. Bridge kan kun se den tilkoblede BMS. Efter testen: hent rapporten, slå skrivning fra og genstart. Ved fejl kontrolleres 108=10, 128=10 og 167=15 manuelt.',
                         stop_reason=s.get('stop_reason'), error=s.get('error'),restore_errors=s.get('restore_errors'),
                         latest=s.get('after') or (s.get('samples') or [s.get('before')])[-1],
