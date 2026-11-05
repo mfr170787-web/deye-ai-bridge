@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import math
 import html
 import io
 import os
@@ -33,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.23"
+APP_VERSION = "0.7.24"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -969,6 +970,106 @@ def daily_accounting(prices):
     return daily_energy(rows, prices, now, validated_tesla_power)
 
 
+PILOT_FILE = DATA_DIR / 'pilot_observations.json'
+PILOT_LOCK = threading.RLock()
+PILOT_RESULTS = {'observed':'Manuelt observeret','not_observed':'Manuel afvigelse','not_tested':'Ikke afprøvet'}
+PILOT_STEPS = [
+    (1,'Udgangspunkt','Aflæs begge BMS: SOC, strøm, temperaturer og alarmer. Kontrollér friske invertermålinger. Inverterkredsen er sikret med 25 A.',False),
+    (2,'Gennemgå planen','Kontrollér pris, solprognose, SOC-reserve og næste handling i planen. Ingen styrekommando udføres.',False),
+    (3,'Automatisk ladestart','Senere styringsversion: start en kort overvåget periode; tilbagelæs kommando og bekræft faktisk ladning. Maks. 90 A samlet.',True),
+    (4,'Stop under ladning','Senere styringsversion: stopknappen skal fjerne ladebehovet, gendanne og bekræfte ophørt netladning.',True),
+    (5,'Følg en planperiode','Senere styringsversion: handlingen skal følge planens tidspunkt, mål og begrundelse under opsyn.',True),
+    (6,'Sol og dyre timer','Sammenhold soloverskud, batteriladning og husets batteriforbrug med de relevante planperioder. Observation alene beviser ikke automatisk styring.',False),
+    (7,'Evaluér og hent analyse','Hent analysepakken med plan, målinger, tidslog, gamle testjournaler og dine observationer. Sammenlign plan og faktisk forløb.',False),
+]
+
+
+def pilot_records():
+    with PILOT_LOCK:
+        try:
+            rows = json.loads(PILOT_FILE.read_text())
+            return [r for r in rows if isinstance(r,dict)][-100:] if isinstance(rows,list) else []
+        except (FileNotFoundError,json.JSONDecodeError):
+            return []
+
+
+def pilot_view(sample, optimization):
+    now = datetime.now(timezone.utc)
+    fresh = False
+    if sample:
+        try:
+            stamp = datetime.fromisoformat(sample['created'])
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            fresh = (0 <= (now-stamp).total_seconds() <= 120 and all(type(sample.get(k)) in (int,float) and math.isfinite(sample[k]) for k in ('soc','battery_w','grid_w','pv_w','load_w')))
+        except (KeyError,TypeError,ValueError):
+            pass
+    current = None
+    for row in optimization.get('hours',[]):
+        try:
+            stamp = datetime.fromisoformat(row['time'])
+            if stamp.tzinfo is not None and stamp <= now < stamp+timedelta(hours=1):
+                current = row
+                break
+        except (KeyError,TypeError,ValueError):
+            pass
+    following = next((r for r in optimization.get('hours',[]) if current and r['time']>current['time'] and r['action']!=current['action']),None)
+    comparison = 'Målingen kan ikke sammenholdes med en aktuel planperiode.'
+    observed = {k:sample.get(k) for k in ('soc','battery_w','grid_w','pv_w','load_w','grid_l1_w','grid_l2_w','grid_l3_w')} if sample else None
+    if fresh and current and observed:
+        power = observed.get('battery_w')
+        if isinstance(power,(float,int)):
+            comparison = ('Batteriet lader.' if power < -100 else 'Batteriet aflader.' if power > 100 else 'Batteriet er omtrent i ro.')+' Dette er en måling, ikke bekræftelse af en udført plankommando.'
+    records = pilot_records()
+    steps = []
+    for number,title,expected,blocked in PILOT_STEPS:
+        last = next((r for r in reversed(records) if r.get('step')==number),None)
+        steps.append(dict(id=number,title=title,expected=expected,blocked=blocked,last=last))
+    blockers = ['Automatisk planstyring er ikke implementeret i denne version; dette kort viser plan og observationer.']
+    if not fresh:
+        blockers.append('Målingen mangler, er ugyldig eller er over 120 sekunder gammel.')
+    if not current:
+        blockers.append('Der mangler en pris- og prognoseplan for det aktuelle tidspunkt.')
+    return dict(mode='Planlægning og manuelle observationer · ingen automatisk drift',automatic_control=False,
+                inverter_circuit_fuse_ampere=25, battery_charge_limit_a=90, created=now.isoformat(),plan_created=optimization.get('created'),sample_created=sample.get('created') if sample else None,
+                current=current,next=following,observed=observed,fresh=fresh,comparison=comparison,
+                blockers=blockers,steps=steps,records=records)
+
+
+def save_pilot_observation(body):
+    step,result,note = body.get('step'),body.get('result'),body.get('note','')
+    if type(step) is not int or not 1 <= step <= 7 or (not isinstance(result,str) or result not in PILOT_RESULTS) or not isinstance(note,str) or len(note)>1000:
+        raise ValueError('Vælg et gyldigt kontroltrin, resultat og højst 1000 tegn notat.')
+    if PILOT_STEPS[step-1][3] and result=='observed':
+        raise ValueError('Dette trin afventer styringsopdatering; det kan ikke markeres observeret endnu.')
+    view = dashboard_data()['pilot']
+    record = dict(at=datetime.now(timezone.utc).isoformat(),step=step,result=result,result_label=PILOT_RESULTS[result],note=note,
+                  evidence_type='manual_observation',automatic_command_executed=False,
+                  sample_created=view['sample_created'],fresh=view['fresh'],planned=view['current'],observed=view['observed'])
+    with PILOT_LOCK:
+        records = (pilot_records()+[record])[-100:]
+        temp = PILOT_FILE.with_suffix('.tmp')
+        with temp.open('w') as f:
+            json.dump(records,f,ensure_ascii=False,indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        temp.replace(PILOT_FILE)
+    return pilot_view({'created':view['sample_created'],**(view['observed'] or {})} if view['sample_created'] else None,
+                      {'created':view['plan_created'],'hours':[r for r in (view['current'],view['next']) if r]})
+
+
+def legacy_tests():
+    rows = []
+    for key,name,test,finished in [('charge20','Tidligere 90 A-test',TWENTY_TEST,('idle','complete','failed')),
+                                    ('suite','Tidligere samlet test',TEST_SUITE,('idle','complete','failed')),
+                                    ('charge','Tidligere manuel test',CHARGE_TEST,('idle','restored'))]:
+        state = test.state()
+        rows.append(dict(key=key,name=name,status=state.get('status','idle'),busy=state.get('status','idle') not in finished,
+                         error=state.get('error') or state.get('message'),baseline=state.get('baseline') or state.get('original'),
+                         current_registers=state.get('current_registers'),restore_errors=state.get('restore_errors')))
+    return rows
+
+
 def dashboard_data():
     with db() as conn:
         sample = conn.execute("SELECT * FROM samples ORDER BY id DESC LIMIT 1").fetchone()
@@ -980,7 +1081,7 @@ def dashboard_data():
     if sample_data:
         sample_data["tesla_energy_today_kwh"] = accounting["car_kwh"]
     optimization = optimization_plan(sample_data, prices, weather)
-    return {"sample": sample_data, **market, "optimization": optimization,
+    return {"sample": sample_data, **market, "optimization": optimization, "pilot": pilot_view(sample_data, optimization),
             "modbus_telemetry": json.loads(sample_data["telemetry_json"]) if sample_data and sample_data.get("telemetry_json") else None,
             "daily_energy": accounting,
             "last_tesla_reminder": last_tesla_reminder(),
@@ -1026,6 +1127,7 @@ def analysis_package(days=7):
         "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
+        "pilot_validation.json": {"automatic_control": False, "records": pilot_records()},
         "samples.json": samples,
         "decisions.json": decisions,
         "market_and_forecast.json": market,
@@ -1222,6 +1324,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/legacy-tests'):
+                return self.send_json(legacy_tests())
             if path.endswith('/api/charge20/report'):
                 payload = json.dumps(TWENTY_TEST.report(), ensure_ascii=False, indent=2).encode('utf-8')
                 self.send_response(200)
@@ -1296,6 +1400,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/pilot-observation'):
+                return self.send_json(save_pilot_observation(body))
+            if any(path.endswith(p) for p in ('/api/charge20','/api/test-suite','/api/charge-test')) and body.get('action') in ('start','restart'):
+                raise ValueError('De gamle ladetest er udgået. Kun stop, gendannelse og rapporter er bevaret.')
             if path.endswith('/api/charge20'):
                 if self.headers.get('X-Deye-Test') != '1':
                     return self.send_json({'error': 'Manglende test-header'}, 403)
