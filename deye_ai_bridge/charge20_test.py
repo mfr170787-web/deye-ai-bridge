@@ -51,7 +51,7 @@ class Charge20Test:
         current = now.hour*60 + now.minute + now.second/60
         needed = math.ceil(current + seconds/60 + 2)
         if not a < b < c or current < a or needed >= c or needed >= 1440:
-            raise ValueError('Time 2 kan ikke forlænges før Time 4/midnat, eller starten ligger i fremtiden. Tilpas TOU manuelt.')
+            raise ValueError(f'Start afvist før skrivning. Time 2-start {start:04d}, slut {end:04d}, Time 4-start {following:04d}; testen kræver slut cirka {needed//60:02d}:{needed%60:02d}. Der skal være plads før Time 4 og midnat, og Time 2-start må ikke ligge i fremtiden. Tilpas TOU manuelt eller vælg en kortere test.')
         if needed <= b:
             return None
         return dict(start=start, original=end, following=following,
