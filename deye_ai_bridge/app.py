@@ -33,7 +33,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.21"
+APP_VERSION = "0.7.22"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -1178,8 +1178,29 @@ def write_test_register(address, value):
             raise RuntimeError('Modbus-skrivning blev ikke bekræftet')
 
 
+def write_test_tou(values):
+    # Private bounded six-register transport; not exposed as an arbitrary API action.
+    if type(values) is not list or len(values) != 6 or any(type(v) is not int or not 0 <= v <= 2359 or v % 100 > 59 for v in values):
+        raise ValueError('TOU-test kræver præcis seks gyldige HHMM-tider.')
+    with modbus_operation('write', 148, 6):
+        cfg = options()
+        transaction = int(time.time()*1000) & 0xffff
+        pdu = struct.pack('>BHHB6H',16,148,6,12,*values)
+        packet = struct.pack('>HHHB',transaction,0,len(pdu)+1,int(cfg['slave_id']))+pdu
+        with socket.create_connection((str(cfg['deye_host']),int(cfg['deye_port'])), timeout=int(cfg['timeout_seconds'])) as sock:
+            sock.sendall(packet)
+            header = recv_exact(sock,7)
+            tx,protocol,length,unit = struct.unpack('>HHHB',header)
+            if tx != transaction or protocol != 0 or unit != int(cfg['slave_id']) or not 2 <= length <= 254:
+                raise RuntimeError('Uventet TOU-skrivesvar')
+            response = recv_exact(sock,length-1)
+        if response != struct.pack('>BHH',16,148,6):
+            raise RuntimeError('TOU-skrivning blev ikke bekræftet')
+
+
 CLOCK_DIAGNOSTICS = ClockDiagnostics(DATA_DIR / 'clock_diagnostics.db', read_holding)
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
+CHARGE_TEST.write_tou = write_test_tou
 
 
 TEST_SUITE = TestSuite(DATA_DIR / 'test_suite.json', CHARGE_TEST)
