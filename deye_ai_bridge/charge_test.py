@@ -83,7 +83,7 @@ class ChargeTest:
                 raise
             return self.view()
 
-    def soc_guard(self, seconds, ceiling=10, recover_clock=False, time2_end_override=None):
+    def soc_guard(self, seconds, ceiling=10, recover_clock=False, time2_end_override=None, time2_start_override=None):
         # Existing tests retain 10 A; only the separate fixed 90 A test supplies 90.
         if type(ceiling) is not int or ceiling not in (10, 90):
             raise ValueError('Kun 10 A eller den særskilte 90 A-test er tilladt.')
@@ -101,6 +101,8 @@ class ChargeTest:
         if value(1100) != 0:
             raise ValueError('Remote-styring skal være deaktiveret under SOC-testen.')
         start, end = value(149), value(150)
+        if time2_start_override is not None:
+            start = time2_start_override
         if time2_end_override is not None:
             end = time2_end_override
         def minute(v):
