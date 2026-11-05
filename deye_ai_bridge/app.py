@@ -34,7 +34,8 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.24"
+APP_VERSION = "0.8.0"
+from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -328,6 +329,12 @@ def energy_plan():
         defaults.update(json.loads(PLAN_FILE.read_text()))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
+    defaults['target_soc'] = min(99, max(16, int(defaults['target_soc'])))
+    defaults['minimum_soc_morning'] = max(15, min(98,int(defaults['minimum_soc_morning'])))
+    defaults['max_charge_w'] = max(0, min(4500,int(defaults['max_charge_w'])))
+    defaults['max_discharge_w'] = max(0,min(4500,int(defaults['max_discharge_w'])))
+    defaults['allow_battery_sale'] = False
+    defaults['max_export_w'] = 0
     return defaults
 
 
@@ -335,12 +342,12 @@ def save_energy_plan(data):
     plan = energy_plan()
     allowed = set(plan)
     plan.update({k: v for k, v in data.items() if k in allowed})
-    plan["target_soc"] = max(10, min(100, int(plan["target_soc"])))
-    plan["minimum_soc_morning"] = max(10, min(100, int(plan["minimum_soc_morning"])))
-    plan["max_charge_w"] = max(0, min(12000, int(plan["max_charge_w"])))
+    plan["target_soc"] = max(10, min(99, int(plan["target_soc"])))
+    plan["minimum_soc_morning"] = max(15, min(98, int(plan["minimum_soc_morning"])))
+    plan["max_charge_w"] = max(0, min(4500, int(plan["max_charge_w"])))
     plan["max_export_w"] = max(0, min(12000, int(plan["max_export_w"])))
     plan["battery_capacity_kwh"] = max(5, min(100, float(plan["battery_capacity_kwh"])))
-    plan["max_discharge_w"] = max(0, min(12000, int(plan["max_discharge_w"])))
+    plan["max_discharge_w"] = max(0, min(4500, int(plan["max_discharge_w"])))
     plan["roundtrip_efficiency_percent"] = max(70, min(100, int(plan["roundtrip_efficiency_percent"])))
     plan["tesla_target_soc"] = max(50, min(80, int(plan["tesla_target_soc"])))
     for key, fallback in (("tesla_departure_time", "07:00"), ("tesla_arrival_time", "16:00")):
@@ -353,6 +360,10 @@ def save_energy_plan(data):
     plan["tesla_shadow_mode"] = True
     plan["main_fuse_ampere"] = 35
     plan["automatic_control"] = False
+    plan["allow_battery_sale"] = False
+    plan["max_export_w"] = 0
+    if plan["minimum_soc_morning"] >= plan["target_soc"]:
+        raise ValueError("Mål-SOC skal være højere end minimumsreserven.")
     plan["saved_at"] = datetime.now(timezone.utc).isoformat()
     pending = PLAN_FILE.with_suffix(".tmp")
     pending.write_text(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -688,6 +699,9 @@ def optimization_plan(sample, prices, weather):
         fraction = slot["fraction"]
         deficit = (slot["load"]-slot["pv"]*.7)*fraction
         action, energy, reason = "hold", 0.0, "Bevar reserve; huset kan bruge nettet."
+        after = reserve(slots[i+1:], plan)
+        charge_target = min(plan['target_soc'],max(plan['minimum_soc_morning'],after['reserve_soc']))
+        discharge_floor = (plan['minimum_soc_morning'] if slot['price'] >= expensive else max(plan['minimum_soc_morning'], after['reserve_soc']))
         if deficit < 0 and soc < plan["target_soc"]:
             energy = -min(-deficit, plan["max_charge_w"]/1000*fraction,
                           (plan["target_soc"]-soc)*capacity/100/eta)
@@ -695,21 +709,21 @@ def optimization_plan(sample, prices, weather):
         elif slot["price"] <= cheap and soc < plan["target_soc"]:
             # Charge only for the upcoming house deficit before the next opportunity.
             after = reserve(slots[i+1:], plan)
-            target = min(plan["target_soc"], after["reserve_soc"])
+            target = charge_target
             energy = -min(plan["max_charge_w"]/1000*fraction, max(0, (target-soc)*capacity/100/eta))
             if energy < -.01:
                 action, reason = "grid_charge", "Pris blandt de billigste; fyld op til beregnet husreserve."
         elif slot["price"] > cheap and soc > plan["minimum_soc_morning"]:
             energy = min(max(0, deficit), plan["max_discharge_w"]/1000*fraction,
-                         max(0, (soc-plan["minimum_soc_morning"])*capacity/100*eta))
+                         max(0, (soc-discharge_floor)*capacity/100*eta))
             if energy > .01:
-                action, reason = "use_battery", "Dæk huset fra batteriet; Tesla må kun bruge energi over husreserven."
+                action, reason = "use_battery", ("Dyr time: brug batteriet til huset over minimumsreserven." if slot['price'] >= expensive else "Brug kun batterienergi ud over reserven til kommende dyre timer.")
         soc += (-energy*eta if energy < 0 else -energy/eta)/capacity*100
         soc = max(0, min(100, soc))
         rows.append({"time": slot["time"].isoformat(), "price_dkk_kwh": round(slot["price"], 4),
                      "pv_forecast_kwh": round(slot["pv"]*fraction, 2),
                      "load_forecast_kwh": round(slot["load"]*fraction, 2),
-                     "action": action, "battery_power_w": round(energy/max(fraction,.001)*1000),
+                     "action": action, "charge_target_soc": round(charge_target,1), "discharge_floor_soc": round(discharge_floor,1), "battery_power_w": round(energy/max(fraction,.001)*1000),
                      "projected_soc": round(soc, 1), "reserve_soc": req["reserve_soc"], "reason": reason})
     return {"status": "learning", "message": "Foreløbig husplan uden fremtidig Tesla-belastning; sol vægtet 70 %.",
             "created": now.isoformat(), "hours_available": len(rows), "learning_samples": count,
@@ -970,15 +984,37 @@ def daily_accounting(prices):
     return daily_energy(rows, prices, now, validated_tesla_power)
 
 
+def automation_context():
+    if PLAN_FILE.exists():
+        json.loads(PLAN_FILE.read_text())  # Corrupt saved settings must not silently arm using defaults.
+    with db() as conn:
+        row=conn.execute('SELECT * FROM samples ORDER BY id DESC LIMIT 1').fetchone()
+    sample=dict(row) if row else {}
+    prices,weather=market_data()
+    model=optimization_plan(sample,prices,weather)
+    DAY_PLANS.update(model)
+    return dict(options=options(),plan=energy_plan(),sample=sample,optimization=model,tesla_power_kw=validated_tesla_power(sample),
+                price_source=CACHE.get('price_source'),price_updated=CACHE.get('price_updated',0),
+                weather_updated=CACHE.get('weather_updated',0),weather_error=CACHE.get('weather_error'))
+
+
+def day_plan_view(model):
+    now=datetime.now(ZoneInfo('Europe/Copenhagen'))
+    cutoff=now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc).isoformat()
+    with db() as conn:
+        samples=[dict(r) for r in conn.execute('SELECT created,soc,battery_w FROM samples WHERE created>=? ORDER BY id',(cutoff,))]
+    return DAY_PLANS.view(model,samples,AUTO_CONTROL.report().get('events',[]),now)
+
+
 PILOT_FILE = DATA_DIR / 'pilot_observations.json'
 PILOT_LOCK = threading.RLock()
 PILOT_RESULTS = {'observed':'Manuelt observeret','not_observed':'Manuel afvigelse','not_tested':'Ikke afprøvet'}
 PILOT_STEPS = [
     (1,'Udgangspunkt','Aflæs begge BMS: SOC, strøm, temperaturer og alarmer. Kontrollér friske invertermålinger. Inverterkredsen er sikret med 25 A.',False),
-    (2,'Gennemgå planen','Kontrollér pris, solprognose, SOC-reserve og næste handling i planen. Ingen styrekommando udføres.',False),
-    (3,'Automatisk ladestart','Senere styringsversion: start en kort overvåget periode; tilbagelæs kommando og bekræft faktisk ladning. Maks. 90 A samlet.',True),
-    (4,'Stop under ladning','Senere styringsversion: stopknappen skal fjerne ladebehovet, gendanne og bekræfte ophørt netladning.',True),
-    (5,'Følg en planperiode','Senere styringsversion: handlingen skal følge planens tidspunkt, mål og begrundelse under opsyn.',True),
+    (2,'Gennemgå planen','Kontrollér pris, solprognose, SOC-reserve og næste handling i planen. Gennemgangen udløser ingen kommando.',False),
+    (3,'Automatisk ladestart','Aktivér automatisk styring under opsyn; tilbagelæs kommando og bekræft faktisk ladning. Maks. 90 A samlet.',False),
+    (4,'Stop under ladning','Deaktivér-knappen skal afslutte planstyringen og bekræfte de oprindelige indstillinger. Inverterens oprindelige drift kan derefter fortsætte.',False),
+    (5,'Følg en planperiode','Handlingen skal følge planens tidspunkt, mål og begrundelse under opsyn.',False),
     (6,'Sol og dyre timer','Sammenhold soloverskud, batteriladning og husets batteriforbrug med de relevante planperioder. Observation alene beviser ikke automatisk styring.',False),
     (7,'Evaluér og hent analyse','Hent analysepakken med plan, målinger, tidslog, gamle testjournaler og dine observationer. Sammenlign plan og faktisk forløb.',False),
 ]
@@ -1025,12 +1061,12 @@ def pilot_view(sample, optimization):
     for number,title,expected,blocked in PILOT_STEPS:
         last = next((r for r in reversed(records) if r.get('step')==number),None)
         steps.append(dict(id=number,title=title,expected=expected,blocked=blocked,last=last))
-    blockers = ['Automatisk planstyring er ikke implementeret i denne version; dette kort viser plan og observationer.']
+    blockers = []
     if not fresh:
         blockers.append('Målingen mangler, er ugyldig eller er over 120 sekunder gammel.')
     if not current:
         blockers.append('Der mangler en pris- og prognoseplan for det aktuelle tidspunkt.')
-    return dict(mode='Planlægning og manuelle observationer · ingen automatisk drift',automatic_control=False,
+    return dict(mode='Driftsplan og observationer · aktivering styres i Automatisk styring',automatic_control=AUTO_CONTROL.state().get('status')=='active',
                 inverter_circuit_fuse_ampere=25, battery_charge_limit_a=90, created=now.isoformat(),plan_created=optimization.get('created'),sample_created=sample.get('created') if sample else None,
                 current=current,next=following,observed=observed,fresh=fresh,comparison=comparison,
                 blockers=blockers,steps=steps,records=records)
@@ -1044,7 +1080,7 @@ def save_pilot_observation(body):
         raise ValueError('Dette trin afventer styringsopdatering; det kan ikke markeres observeret endnu.')
     view = dashboard_data()['pilot']
     record = dict(at=datetime.now(timezone.utc).isoformat(),step=step,result=result,result_label=PILOT_RESULTS[result],note=note,
-                  evidence_type='manual_observation',automatic_command_executed=False,
+                  evidence_type='manual_observation',observation_issued_command=False,automatic_control_active=view['automatic_control'],
                   sample_created=view['sample_created'],fresh=view['fresh'],planned=view['current'],observed=view['observed'])
     with PILOT_LOCK:
         records = (pilot_records()+[record])[-100:]
@@ -1081,13 +1117,14 @@ def dashboard_data():
     if sample_data:
         sample_data["tesla_energy_today_kwh"] = accounting["car_kwh"]
     optimization = optimization_plan(sample_data, prices, weather)
-    return {"sample": sample_data, **market, "optimization": optimization, "pilot": pilot_view(sample_data, optimization),
+    DAY_PLANS.update(optimization)
+    return {"sample": sample_data, **market, "optimization": optimization, "pilot": pilot_view(sample_data, optimization), "automation": AUTO_CONTROL.report(), "day_plans": day_plan_view(optimization),
             "modbus_telemetry": json.loads(sample_data["telemetry_json"]) if sample_data and sample_data.get("telemetry_json") else None,
             "daily_energy": accounting,
             "last_tesla_reminder": last_tesla_reminder(),
             "tesla_shadow": tesla_shadow_plan(sample_data, prices, optimization),
             "decisions": [{**dict(x), "details": json.loads(x["details_json"])} for x in decisions],
-            "read_only": bool(options()['read_only']), "automatic_writes": False}
+            "read_only": bool(options()['read_only']), "automatic_writes": AUTO_CONTROL.state().get("status")=="active"}
 
 
 def analysis_package(days=7):
@@ -1117,6 +1154,7 @@ def analysis_package(days=7):
         "privacy": "Adgangskoder, tokens, præcis placering og Deye-IP er udeladt.",
         "read_only": bool(options()['read_only']),
         "commissioning_enabled": bool(options().get('commissioning_enabled', False)),
+        "automatic_control": AUTO_CONTROL.state().get("status")=="active",
     }
     files = {
         "manifest.json": manifest,
@@ -1127,7 +1165,9 @@ def analysis_package(days=7):
         "charge_test.json": {k: v for k, v in CHARGE_TEST.state().items() if k != 'endpoint'},
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
-        "pilot_validation.json": {"automatic_control": False, "records": pilot_records()},
+        "automatic_control.json": AUTO_CONTROL.report(),
+        "two_day_plan.json": DAY_PLANS.view(optimization,samples,AUTO_CONTROL.report().get("events",[])),
+        "pilot_validation.json": {"automatic_control": AUTO_CONTROL.state().get("status")=="active", "records": pilot_records()},
         "samples.json": samples,
         "decisions.json": decisions,
         "market_and_forecast.json": market,
@@ -1300,6 +1340,24 @@ def write_test_tou(values):
             raise RuntimeError('TOU-skrivning blev ikke bekræftet')
 
 
+def write_automatic_values(address, values):
+    if not valid_auto_write(address,values):
+        raise ValueError('Automatisk kommando uden for tilladte registre/værdier.')
+    with modbus_operation('write',address,len(values)):
+        cfg=options();transaction=int(time.time()*1000)&0xffff
+        count=len(values)
+        pdu=struct.pack('>BHHB',16,address,count,count*2)+struct.pack('>'+'H'*count,*values)
+        packet=struct.pack('>HHHB',transaction,0,len(pdu)+1,int(cfg['slave_id']))+pdu
+        with socket.create_connection((str(cfg['deye_host']),int(cfg['deye_port'])),timeout=int(cfg['timeout_seconds'])) as sock:
+            sock.sendall(packet);header=recv_exact(sock,7)
+            tx,protocol,length,unit=struct.unpack('>HHHB',header)
+            if tx!=transaction or protocol!=0 or unit!=int(cfg['slave_id']) or not 2<=length<=254:
+                raise RuntimeError('Ugyldigt automatisk Modbus-svar')
+            response=recv_exact(sock,length-1)
+        if response!=struct.pack('>BHH',16,address,count):
+            raise RuntimeError('Automatisk Modbus-skrivning ikke bekræftet')
+
+
 CLOCK_DIAGNOSTICS = ClockDiagnostics(DATA_DIR / 'clock_diagnostics.db', read_holding)
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
 CHARGE_TEST.write_tou = write_test_tou
@@ -1309,7 +1367,11 @@ TEST_SUITE = TestSuite(DATA_DIR / 'test_suite.json', CHARGE_TEST)
 TWENTY_TEST = Charge20Test(DATA_DIR / 'charge20_test.json', CHARGE_TEST)
 TEST_SUITE.other_busy = TWENTY_TEST.busy
 TWENTY_TEST.other_busy = TEST_SUITE.busy
-CHARGE_TEST.observation_paused = TWENTY_TEST.busy
+DAY_PLANS = DayPlans(DATA_DIR / 'two_day_plan_history.json')
+AUTO_CONTROL = AutomaticControl(DATA_DIR / 'automatic_control.json',read_holding,write_automatic_values,
+    automation_context,CHARGE_TEST.endpoint,CHARGE_TEST.lock,
+    lambda: TEST_SUITE.busy() or TWENTY_TEST.busy() or CHARGE_TEST.state().get('status','idle') not in ('idle','restored'))
+CHARGE_TEST.observation_paused = lambda: TWENTY_TEST.busy() or AUTO_CONTROL.busy()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1324,6 +1386,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/automation'):
+                return self.send_json(AUTO_CONTROL.report())
             if path.endswith('/api/legacy-tests'):
                 return self.send_json(legacy_tests())
             if path.endswith('/api/charge20/report'):
@@ -1400,6 +1464,14 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/automation'):
+                if self.headers.get('X-Deye-Control') != '1':
+                    return self.send_json({'error':'Manglende styringsheader'},403)
+                if body.get('action')=='enable':
+                    return self.send_json(AUTO_CONTROL.enable(body.get('cloud_off')))
+                if body.get('action')=='disable':
+                    return self.send_json(AUTO_CONTROL.disable())
+                raise ValueError('Ukendt styringshandling')
             if path.endswith('/api/pilot-observation'):
                 return self.send_json(save_pilot_observation(body))
             if any(path.endswith(p) for p in ('/api/charge20','/api/test-suite','/api/charge-test')) and body.get('action') in ('start','restart'):
@@ -1459,4 +1531,5 @@ if __name__ == "__main__":
     threading.Thread(target=CLOCK_DIAGNOSTICS.worker, daemon=True).start()
     threading.Thread(target=TEST_SUITE.worker, args=(TWENTY_TEST,), daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
+    threading.Thread(target=AUTO_CONTROL.worker,daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
