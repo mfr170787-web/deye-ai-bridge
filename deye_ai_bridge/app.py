@@ -33,7 +33,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.7.19"
+APP_VERSION = "0.7.20"
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
@@ -1161,7 +1161,7 @@ def snapshot(registers):
 def write_test_register(address, value):
     with modbus_operation("write", address, 1):
         # Private commissioning transport; never expose arbitrary register writes.
-        if type(value) is not int or not ((address in (108, 128) and 0 <= value <= 240) or (address == 167 and value in (15, 30))):
+        if type(value) is not int or not ((address in (108, 128) and 0 <= value <= 240) or (address == 167 and value in (15, 30)) or (address == 150 and 0 <= value <= 2359 and value % 100 < 60)):
             raise ValueError('Register eller værdi uden for testens område')
         cfg = options()
         transaction = int(time.time() * 1000) & 0xffff
