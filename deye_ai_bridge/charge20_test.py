@@ -46,12 +46,13 @@ class Charge20Test:
             raise ValueError('Ugyldige oprindelige TOU-tider; ingen skrivning.')
         now = datetime.now(ZoneInfo('Europe/Copenhagen'))
         minute = now.hour*60 + now.minute
-        end = math.ceil(minute + now.second/60 + seconds/60 + 3)
-        points = [minute-3, minute-2, end, end+1, end+2, end+3]
+        anchor = minute//10*10
+        end = math.ceil((minute + now.second/60 + seconds/60 + 3)/10)*10
+        points = [anchor-20, anchor-10, end, end+10, end+20, end+30]
         if points[0] < 0 or points[-1] >= 1440:
             raise ValueError('Start afvist før skrivning: testen og TOU-margen skal kunne rummes på samme dato. Start tidligere eller vælg kortere test.')
         target = {str(a): v//60*100+v%60 for a,v in zip(range(148,154), points)}
-        return dict(original=original, target=target)
+        return dict(original=original, target=target, grid_minutes=10)
 
     def check_time2_context(self, s):
         plan = s.get('time2_extension')
@@ -172,13 +173,23 @@ class Charge20Test:
         plan = s['tou_schedule']
         current = {a:self.charge.value(int(a)) for a in plan['original']}
         if any(v not in (plan['original'][a], plan['target'][a]) for a,v in current.items()):
-            raise ValueError('TOU ændret af anden styring; ingen overskrivning. Gendan manuelt fra rapporten.')
+            # Recover only the exact uniform rounding observed in a 0.7.22 pre-charge failure.
+            normalized = {a:v//100*100+(v%100)//10*10 for a,v in plan['target'].items()}
+            legacy = (plan.get('grid_minutes') is None and s.get('prepare_index') == -1
+                      and not any(a in s.get('written', []) for a in self.BASE)
+                      and s.get('tou_write_intent') and current == normalized)
+            if not legacy:
+                self.log(s, 'tou_restore_unexpected', values=current)
+                self.save(s)
+                raise ValueError('Uventede TOU-tider; årsagen er ikke fastslået. Ingen overskrivning; gendan manuelt fra rapporten.')
+            self.log(s, 'tou_legacy_rounding_recovery', values=current, requested=plan['target'])
+            s['tou_recovery_pending'] = dict(s['baseline'], **current)
         self.log(s, 'tou_restore_write', values=plan['original'])
         self.save(s)
         self.charge.write_tou([plan['original'][str(a)] for a in range(148,154)])
         current = {a:self.charge.value(int(a)) for a in plan['original']}
         self.log(s, 'tou_restore_readback', values=current)
-        if any(v not in (plan['original'][a], plan['target'][a]) for a,v in current.items()):
+        if any(v not in (plan['original'][a], plan['target'][a]) for a,v in current.items()) and not (s.get('tou_recovery_pending') and all(current[a] == s['tou_recovery_pending'][a] for a in current)):
             raise ValueError('Uventede TOU-tider efter gendannelse; kontrollér manuelt.')
 
     def prepare_tou(self, s):
@@ -192,7 +203,9 @@ class Charge20Test:
         if self.charge.measure()['charging_w'] > 5500:
             raise ValueError('Målt ladeeffekt over 5500 W før TOU-klargøring.')
         if any(current[a] not in (plan['original'][a], plan['target'][a]) for a in plan['original']):
-            raise ValueError('TOU-tider ændret uden for testen.')
+            self.log(s, 'tou_prepare_unexpected', values={a:current[a] for a in plan['original']})
+            self.save(s)
+            raise ValueError('Uventede TOU-tider under klargøring; årsagen er ikke fastslået.')
         if not s.get('tou_write_intent'):
             if any(current[a] != v for a,v in plan['original'].items()):
                 raise ValueError('TOU-tider ændret før skrivning.')
@@ -348,7 +361,7 @@ class Charge20Test:
                         if current==s['baseline']:
                             s.update(status='verifying_restore',restore_started=time.time(),restore_checks=0)
                             self.log(s,'baseline_first_observed',values=current)
-                        elif any(current[a] not in (s['baseline'][a],s.get('target', {'108':20,'128':20,'167':30})[a]) for a in current):
+                        elif current != s.get('tou_recovery_pending') and any(current[a] not in (s['baseline'][a],s.get('target', {'108':20,'128':20,'167':30})[a]) for a in current):
                             s.update(status='restore_failed',error='En anden registerværdi er set. Gendan manuelt; ingen automatisk overskrivning.')
                         elif time.time()>=s['settle_deadline']:
                             s.update(status='restore_failed',error='Udgangspunktet er ikke bekræftet inden 10 sekunder. Gendan manuelt; ingen nye skrivninger.')
