@@ -35,27 +35,23 @@ class Charge20Test:
 
     def registers(self, s=None):
         addresses = list(self.BASE)
-        if s and '150' in s.get('baseline', {}):
-            addresses.append(150)
+        if s:
+            addresses.extend(int(a) for a in s.get('baseline', {}) if int(a) not in addresses)
         return {str(a): self.charge.value(a) for a in addresses}
 
-    def time2_plan(self, seconds):
-        start, end, following = [self.charge.value(a) for a in (149, 150, 151)]
-        def minute(v):
-            if type(v) is not int or not 0 <= v <= 2359 or v % 100 > 59:
-                raise ValueError('Ugyldigt TOU-klokkeslæt; ingen forlængelse.')
-            return v // 100 * 60 + v % 100
-        a, b, c = minute(start), minute(end), minute(following)
-        c = c or 1440
+    def tou_plan(self, seconds):
+        # Read and preserve every time point, even a non-ascending existing schedule.
+        original = {str(a): self.charge.value(a) for a in range(148,154)}
+        if any(type(v) is not int or not 0 <= v <= 2359 or v % 100 > 59 for v in original.values()):
+            raise ValueError('Ugyldige oprindelige TOU-tider; ingen skrivning.')
         now = datetime.now(ZoneInfo('Europe/Copenhagen'))
-        current = now.hour*60 + now.minute + now.second/60
-        needed = math.ceil(current + seconds/60 + 2)
-        if not a < b < c or current < a or needed >= c or needed >= 1440:
-            raise ValueError(f'Start afvist før skrivning. Time 2-start {start:04d}, slut {end:04d}, Time 4-start {following:04d}; testen kræver slut cirka {needed//60:02d}:{needed%60:02d}. Der skal være plads før Time 4 og midnat, og Time 2-start må ikke ligge i fremtiden. Tilpas TOU manuelt eller vælg en kortere test.')
-        if needed <= b:
-            return None
-        return dict(start=start, original=end, following=following,
-                    target=(needed//60)*100+needed%60)
+        minute = now.hour*60 + now.minute
+        end = math.ceil(minute + now.second/60 + seconds/60 + 3)
+        points = [minute-3, minute-2, end, end+1, end+2, end+3]
+        if points[0] < 0 or points[-1] >= 1440:
+            raise ValueError('Start afvist før skrivning: testen og TOU-margen skal kunne rummes på samme dato. Start tidligere eller vælg kortere test.')
+        target = {str(a): v//60*100+v%60 for a,v in zip(range(148,154), points)}
+        return dict(original=original, target=target)
 
     def check_time2_context(self, s):
         plan = s.get('time2_extension')
@@ -74,8 +70,10 @@ class Charge20Test:
             seconds = body.get("seconds", 120)
             if type(seconds) is not int or seconds not in (120, 600, 1800, 3600):
                 raise ValueError("Vælg en test på 120, 600, 1800 eller 3600 sekunder.")
-            extension = self.time2_plan(seconds) if body.get('extend_time2') is True else None
-            self.charge.soc_guard(seconds, time2_end_override=extension['target'] if extension else None)
+            schedule = self.tou_plan(seconds) if body.get('extend_time2') is True else None
+            self.charge.soc_guard(seconds,
+                time2_start_override=schedule['target']['149'] if schedule else None,
+                time2_end_override=schedule['target']['150'] if schedule else None)
             if self.registers() != {str(a):v for a,v in self.BASE.items()}:
                 raise ValueError('Start kræver 108=10 A, 128=10 A og 167=15 %.')
             if not 90 <= self.charge.value(212) <= 500:
@@ -87,11 +85,11 @@ class Charge20Test:
                      test_current_a=90, clock_policy='bounded_one_hour_back_recheck', timer_basis='minimum_of_wall_and_process_monotonic_deadline', target={str(a):v for a,v in self.TARGET.items()},
                      prepare_index=0, prepare_deadline=time.time()+25,
                      before=self.charge.measure())
-            if extension:
-                s['time2_extension'] = extension
-                s['baseline']['150'] = extension['original']
-                s['target']['150'] = extension['target']
-                s.update(prepare_index=-1, confirm_started=None, confirm_checks=0)
+            if schedule:
+                s['tou_schedule'] = schedule
+                s['baseline'].update(schedule['original'])
+                s['target'].update(schedule['target'])
+                s.update(prepare_index=-1, confirm_started=None, confirm_checks=0, tou_write_intent=False)
             self.save(s)
             return self.view()
 
@@ -111,7 +109,7 @@ class Charge20Test:
             else:
                 # Lower the SOC demand first, then the grid and global limits.
                 for a in (167,128,108,150):
-                    if a not in s['written']:
+                    if a not in s['written'] or (a == 150 and s.get('tou_schedule')):
                         continue
                     try:
                         actual=self.charge.value(a)
@@ -134,6 +132,11 @@ class Charge20Test:
                             self.log(s, 'restore_pending', address=a, value=actual)
                     except Exception as exc:
                         errors.append(str(exc))
+                if s.get('tou_write_intent'):
+                    try:
+                        self.restore_tou(s)
+                    except Exception as exc:
+                        errors.append(str(exc))
             s['restore_errors']=errors
             s.update(status='restore_failed' if errors else 'settling_restore',
                      settle_deadline=time.time()+10, restore_started=time.time(), restore_checks=0)
@@ -149,6 +152,8 @@ class Charge20Test:
     def guarded_time(self, s):
         try:
             self.check_time2_context(s)
+            if s.get('tou_schedule') and any(self.charge.value(int(a)) != v for a,v in s['tou_schedule']['target'].items()):
+                raise ValueError('TOU-tiderne er ændret under testen.')
             if s.get('time2_extension') and self.charge.value(150) != s['target']['150']:
                 raise ValueError('Time 2-sluttiden er ændret under testen.')
             self.charge.soc_guard(self.remaining(s), ceiling=90, recover_clock=True)
@@ -160,7 +165,60 @@ class Charge20Test:
                 self.log(s, 'clock_recheck', evidence=evidence)
                 self.save(s)
 
+    def restore_tou(self, s):
+        # Cancel charging before moving the slot boundaries back.
+        if any(self.charge.value(a) != v for a,v in self.BASE.items()):
+            raise ValueError('TOU er ikke gendannet, fordi 10 A / 15 % ikke er bekræftet. Gendan manuelt fra rapporten.')
+        plan = s['tou_schedule']
+        current = {a:self.charge.value(int(a)) for a in plan['original']}
+        if any(v not in (plan['original'][a], plan['target'][a]) for a,v in current.items()):
+            raise ValueError('TOU ændret af anden styring; ingen overskrivning. Gendan manuelt fra rapporten.')
+        self.log(s, 'tou_restore_write', values=plan['original'])
+        self.save(s)
+        self.charge.write_tou([plan['original'][str(a)] for a in range(148,154)])
+        current = {a:self.charge.value(int(a)) for a in plan['original']}
+        self.log(s, 'tou_restore_readback', values=current)
+        if any(v not in (plan['original'][a], plan['target'][a]) for a,v in current.items()):
+            raise ValueError('Uventede TOU-tider efter gendannelse; kontrollér manuelt.')
+
+    def prepare_tou(self, s):
+        plan = s['tou_schedule']
+        self.charge.soc_guard(self.remaining(s), time2_start_override=plan['target']['149'], time2_end_override=plan['target']['150'])
+        current = self.registers(s)
+        if any(current[str(a)] != v for a,v in self.BASE.items()):
+            raise ValueError('Udgangspunktet er ændret før TOU-klargøring.')
+        if not 90 <= self.charge.value(212) <= 500:
+            raise ValueError('BMS tillader ikke mindst 90 A før TOU-klargøring.')
+        if self.charge.measure()['charging_w'] > 5500:
+            raise ValueError('Målt ladeeffekt over 5500 W før TOU-klargøring.')
+        if any(current[a] not in (plan['original'][a], plan['target'][a]) for a in plan['original']):
+            raise ValueError('TOU-tider ændret uden for testen.')
+        if not s.get('tou_write_intent'):
+            if any(current[a] != v for a,v in plan['original'].items()):
+                raise ValueError('TOU-tider ændret før skrivning.')
+            s['tou_write_intent'] = True
+            s['written'].extend(range(148,154))
+            self.log(s, 'tou_prepare_write', values=plan['target'], original=plan['original'])
+            s.update(prepare_deadline=time.time()+25)
+            self.save(s)  # Save all six originals and write intent before a single FC16 request.
+            self.charge.write_tou([plan['target'][str(a)] for a in range(148,154)])
+            return
+        self.log(s, 'tou_prepare_readback', values={a:current[a] for a in plan['original']})
+        if all(current[a] == v for a,v in plan['target'].items()):
+            if s.get('confirm_started') is None:
+                s.update(confirm_started=time.time(), confirm_checks=0)
+            s['confirm_checks'] += 1
+            if time.time()-s['confirm_started'] >= 10 and s['confirm_checks'] >= 3:
+                s.update(prepare_index=0, prepare_deadline=time.time()+25, confirm_started=None, confirm_checks=0)
+        else:
+            s.update(confirm_started=None, confirm_checks=0)
+        if s['prepare_index'] == -1 and time.time() >= s['prepare_deadline']:
+            raise ValueError('Alle seks TOU-tider blev ikke stabilt bekræftet inden 25 sekunder.')
+        self.save(s)
+
     def prepare_time2(self, s):
+        if s.get('tou_schedule'):
+            return self.prepare_tou(s)
         self.check_time2_context(s)
         self.charge.soc_guard(self.remaining(s), time2_end_override=s['target']['150'])
         current = self.registers(s)
@@ -232,6 +290,8 @@ class Charge20Test:
                     expected={str(a):(self.TARGET[a] if a in s['written'] else self.BASE[a]) for a in self.BASE}
                     if s.get('time2_extension'):
                         expected['150'] = s['target']['150']
+                    if s.get('tou_schedule'):
+                        expected.update(s['tou_schedule']['target'])
                     self.log(s,'prepare_readback',values=current)
                     if current==expected:
                         if s.get('confirm_started') is None:
@@ -326,7 +386,7 @@ class Charge20Test:
                 progress=100 if status=='complete' else 0
             return dict(status=status, headline=labels.get(status,status).replace('90 A',str(s.get('test_current_a',90 if status=='idle' else 20))+' A'),progress_percent=progress,
                         instruction='Under opladning: tag et billede af hver BMS med strøm, spænding og temperatur. Bridge kan kun se den tilkoblede BMS. Efter testen: hent rapporten, slå skrivning fra og genstart. Ved fejl kontrolleres 108=10, 128=10 og 167=15 manuelt.',
-                        duration_seconds=s.get('duration_seconds',120), time2_extension=s.get('time2_extension'),
+                        duration_seconds=s.get('duration_seconds',120), time2_extension=s.get('time2_extension'), tou_schedule=s.get('tou_schedule'),
                         remaining_seconds=max(0,int(self.remaining(s))) if status in ('preparing','active') else None,
                         stop_reason=s.get('stop_reason'), error=s.get('error'),restore_errors=s.get('restore_errors'),
                         latest=s.get('after') or (s.get('samples') or [s.get('before')])[-1],
