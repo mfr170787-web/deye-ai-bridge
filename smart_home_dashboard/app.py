@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 
 
 def options():
@@ -66,6 +66,7 @@ def entity_list():
             "brightness": attrs.get("brightness"), "rgb_color": attrs.get("rgb_color"),
             "supported_color_modes": attrs.get("supported_color_modes", []),
             "area": areas.get(entity_id),
+            "operation": {key:attrs.get(key) for key in ("nu","naeste","naeste_tid","bekraeftet","opdateret","fejl")} if entity_id=="sensor.deye_ai_drift" else None,
         })
     return sorted(result, key=lambda x: (str(x.get("area") or ""), x["domain"], str(x["name"]).lower()))
 
