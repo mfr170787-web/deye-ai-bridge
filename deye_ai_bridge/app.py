@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.3"
+APP_VERSION = "0.8.4"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -765,7 +765,18 @@ def maybe_send_tesla_reminder(sample, prices):
     plug_by = datetime.fromisoformat(schedule["plug_in_by"])
     # Notify when the normal home window begins; waiting until the cheap slot
     # could make the reminder arrive after the household has gone to bed.
-    if now < arrival or now.hour < 12:
+    weekend_day = datetime.fromisoformat(schedule["departure"])-timedelta(seconds=1)
+    if weekend_day.weekday() in (5,6):
+        quiet_end = now.replace(hour=8,minute=30,second=0,microsecond=0)
+        if now.weekday() in (5,6) and (now < quiet_end or now.hour >= 22):
+            return
+        if now.weekday() not in (5,6):
+            # Daytime weekend charging is announced after 08:30 on that day.
+            if plug_by.date()>now.date() and (plug_by.hour,plug_by.minute)>=(8,30):
+                return
+            if now < arrival or now.hour >= 22:
+                return
+    elif now < arrival or now.hour < 12:
         return
     if not schedule["prices_complete"]:
         plug_by = max(now, arrival)
@@ -971,7 +982,26 @@ def collect_sample():
             conn.execute("INSERT INTO decisions(created,action,title,explanation,details_json) VALUES(?,?,?,?,?)",
                          (sample["created"], action, title, explanation, json.dumps(details, ensure_ascii=False)))
     maybe_send_tesla_reminder(sample, prices)
+    publish_home_operation(sample, prices, weather)
     return sample
+
+
+def publish_home_operation(sample, prices, weather):
+    """Publish a native HA entity for movable Lovelace cards; no inverter writes."""
+    try:
+        model=optimization_plan(sample,prices,weather)
+        rows=model.get('hours',[]);current=rows[0] if rows else {}
+        nxt=next((r for r in rows[1:] if r.get('action')!=current.get('action')),{})
+        a=AUTO_CONTROL.report()
+        names={'use_battery':'Batteri til huset','grid_charge':'Opladning fra nettet','hold':'Bevar batterireserve','solar_charge':'Gem soloverskud'}
+        labels={'active':'Aktiv','disabled':'Deaktiveret','fault':'Stoppet efter fejl','restore_failed':'Gendannelse ikke bekræftet','verifying_restore':'Efterkontrol','restoring':'Gendanner','enabling':'Aktiverer'}
+        ha_request('/states/sensor.deye_ai_drift','POST',{'state':labels.get(a.get('status'),'Ukendt'),'attributes':{
+            'friendly_name':'Deye AI · drift nu og næste','icon':'mdi:home-lightning-bolt',
+            'nu':names.get(current.get('action'),'Afventer plan'), 'naeste':names.get(nxt.get('action'),'Afventer næste plan'),
+            'naeste_tid':nxt.get('time',''),'bekraeftet':names.get((a.get('command') or {}).get('action'),'Ingen'),
+            'opdateret':datetime.now(ZoneInfo('Europe/Copenhagen')).isoformat(),'fejl':a.get('error') or ''}})
+    except Exception as exc:
+        print('Home dashboard entity update failed: %s'%exc,flush=True)
 
 
 def daily_accounting(prices):
