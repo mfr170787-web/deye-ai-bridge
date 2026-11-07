@@ -69,7 +69,14 @@ def charge_schedule(sample, prices, plan, now):
     departure = now.replace(hour=dh, minute=dm, second=0, microsecond=0)
     if departure <= now:
         departure += timedelta(days=1)
-    arrival = departure.replace(hour=ah, minute=am)
+    # Weekend availability extends through the whole day, including Friday night.
+    weekend = now.weekday() in (5,6) or departure.weekday() in (5,6)
+    if weekend:
+        day = now if now.weekday() in (5,6) else departure
+        departure = (day+timedelta(days=1)).replace(hour=0,minute=0,second=0,microsecond=0)
+        arrival = day.replace(hour=0,minute=0,second=0,microsecond=0) if now.weekday() in (5,6) else now.replace(hour=ah,minute=am,second=0,microsecond=0)
+    else:
+        arrival = departure.replace(hour=ah, minute=am)
     if arrival >= departure:
         arrival -= timedelta(days=1)
     start = now if sample.get('tesla_connected') else max(now, arrival)
