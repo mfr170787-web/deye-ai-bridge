@@ -316,6 +316,9 @@ class AutomaticControl:
 
     def tick(self):
         s=self.state()
+        if s.get('status')=='restore_failed' and s.get('auto_resume'):
+            self.retry_communication_restore(s)
+            return
         if s.get('status')=='fault' and s.get('restored') and s.get('auto_resume'):
             self.resume_after_communication_fault(s)
             return
@@ -331,7 +334,9 @@ class AutomaticControl:
                         self.log(s,'restore_verified')
                     self.save(s)
                 except Exception as exc:
-                    s.update(status='restore_failed',error=str(exc),restored=False);self.save(s)
+                    s.update(status='restore_failed',error=str(exc),restored=False)
+                    if not self.communication_read_error(str(exc)):s['auto_resume']=False
+                    self.save(s)
             return
         if s.get('status')!='active':return
         try:
@@ -343,6 +348,37 @@ class AutomaticControl:
                 self.apply(s,ctx,row,c,m,floor,maximum)
         except Exception as exc:
             self.disable('fault: '+str(exc))
+
+    @staticmethod
+    def communication_read_error(error):
+        return 'Modbus read,' in error and any(t in error for t in ('TimeoutError','ConnectionError'))
+
+    def retry_communication_restore(self,s):
+        if time.time()-s.get('restore_retry_at',0)<30:return
+        with self.lock:
+            s=self.state()
+            if s.get('status')!='restore_failed' or not s.get('auto_resume'):return
+            if not self.communication_read_error(s.get('error','')):
+                s['auto_resume']=False;self.save(s);return
+            s['restore_retry_at']=time.time();self.save(s)
+            try:
+                if s['endpoint']!=list(self.endpoint()):raise ValueError('Forbindelsen er ændret.')
+                previous=None
+                for _ in range(3):
+                    current=self.owned()
+                    if current!=s['baseline']:self.check_owned(s,current)
+                    if previous is not None and current!=previous:raise ValueError('Registre er ikke stabile efter forbindelsesfejl.')
+                    previous=current;time.sleep(.5)
+                attempts=[t for t in s.get('restore_retry_attempts',[]) if time.time()-t<3600]
+                if len(attempts)>=3:return
+                attempts.append(time.time());s['restore_retry_attempts']=attempts
+                self.log(s,'communication_restored_retry');self.save(s)
+                self.disable(s['stop_reason'])
+            except Exception as exc:
+                s=self.state()
+                if not self.communication_read_error(str(exc)):
+                    s['auto_resume']=False;s['error']=str(exc)
+                    self.log(s,'restore_retry_blocked',error=str(exc));self.save(s)
 
     def resume_after_communication_fault(self,s):
         if time.time()-s.get('resume_last_attempt',0)<60:return
