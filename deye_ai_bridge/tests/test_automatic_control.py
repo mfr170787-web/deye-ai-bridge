@@ -84,6 +84,30 @@ class ControllerTests(unittest.TestCase):
         self.assertNotEqual(self.c.state()['status'],'active')
         self.assertFalse(self.c.state().get('auto_resume'))
 
+    def test_restore_retries_when_connection_returns(self):
+        self.c.enable(True)
+        read=self.c.read
+        def offline(*args):raise ConnectionError('Modbus read, register 108: ConnectionError: closed')
+        self.c.read=offline
+        self.c.disable('fault: Modbus read, register 212: ConnectionError: closed')
+        self.assertEqual(self.c.state()['status'],'restore_failed')
+        writes=len(self.writes);self.c.tick();self.assertEqual(len(self.writes),writes)
+        self.c.read=read;self.advance(31);self.c.tick()
+        self.assertEqual(self.c.state()['status'],'verifying_restore')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        self.assertTrue(self.c.state()['restored']);self.c.tick()
+        self.assertEqual(self.c.state()['status'],'active')
+
+    def test_restore_retry_rejects_foreign_register(self):
+        self.c.enable(True);state=self.c.state()
+        state.update(status='restore_failed',auto_resume=True,error='Modbus read, register 108: TimeoutError',stop_reason='fault: Modbus read, register 108: TimeoutError')
+        self.c.save(state);self.r[148]=1234;writes=len(self.writes)
+        self.c.tick()
+        self.assertEqual(len(self.writes),writes)
+        self.assertFalse(self.c.state()['auto_resume'])
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
