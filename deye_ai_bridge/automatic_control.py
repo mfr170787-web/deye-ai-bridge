@@ -189,7 +189,7 @@ class AutomaticControl:
                 if not valid_write(start,[baseline[str(a)] for a in range(start,start+count)]):
                     raise ValueError('Oprindelige indstillinger ligger uden for understøttet gendannelse.')
             s=dict(status='enabling',restored=False,started=datetime.now(timezone.utc).isoformat(),endpoint=list(self.endpoint()),
-                   baseline=baseline,expected=dict(baseline),pending=None,events=old.get('events',[]),observations=[],error=None)
+                   baseline=baseline,expected=dict(baseline),pending=None,events=old.get('events',[]),observations=[],error=None,resume_attempts=old.get('resume_attempts',[]))
             self.log(s,'enabled',baseline=baseline);self.save(s)
             try:
                 # No charge/discharge demand while reshaping the TOU schedule.
@@ -265,8 +265,11 @@ class AutomaticControl:
         with self.lock:
             self.generation+=1
             s=self.state()
+            if reason=='manual_disable':
+                s['auto_resume']=False;self.save(s)
             if s.get('status') in ('disabled','fault') and s.get('restored',True):return self.report()
             if s.get('status')=='verifying_restore':return self.report()
+            s['auto_resume']=(reason.startswith('fault: Modbus read,') and any(t in reason for t in ('TimeoutError','ConnectionError')))
             s.update(status='restoring',error=reason if reason!='manual_disable' else None,stop_reason=reason)
             self.log(s,'disable_requested',reason=reason);self.save(s)
             try:
@@ -313,6 +316,9 @@ class AutomaticControl:
 
     def tick(self):
         s=self.state()
+        if s.get('status')=='fault' and s.get('restored') and s.get('auto_resume'):
+            self.resume_after_communication_fault(s)
+            return
         if s.get('status')=='verifying_restore':
             with self.lock:
                 s=self.state()
@@ -338,7 +344,32 @@ class AutomaticControl:
         except Exception as exc:
             self.disable('fault: '+str(exc))
 
+    def resume_after_communication_fault(self,s):
+        if time.time()-s.get('resume_last_attempt',0)<60:return
+        with self.lock:
+            s=self.state()
+            if not s.get('auto_resume') or not s.get('restored') or s.get('status')!='fault':return
+            attempts=[t for t in s.get('resume_attempts',[]) if time.time()-t<3600]
+            if len(attempts)>=3:
+                s['auto_resume']=False;self.log(s,'auto_resume_blocked',reason='Tre forsøg inden for en time.');self.save(s);return
+            attempts.append(time.time());s.update(resume_attempts=attempts,resume_last_attempt=time.time());self.save(s)
+            try:
+                if s['endpoint']!=list(self.endpoint()):raise ValueError('Forbindelsen er ændret.')
+                # Require repeated baseline confirmation; do not adopt foreign values.
+                for _ in range(3):
+                    if self.owned()!=s['baseline']:raise ValueError('Gendannede registre afviger.')
+                    time.sleep(.5)
+                self.guards(self.context(),True)
+                self.log(s,'auto_resume_ready');s['auto_resume']=False;self.save(s)
+                self.enable(True)
+            except Exception as exc:
+                current=self.state()
+                if current.get('status')=='fault':
+                    self.log(current,'auto_resume_wait',error=str(exc));self.save(current)
+
     def worker(self):
+        with self.lock:
+            s=self.state();s['auto_resume']=False;self.save(s)
         if self.busy():self.disable('process_restart: Gendan før ny manuel aktivering.')
         while True:
             time.sleep(5)
