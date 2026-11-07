@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.4"
+APP_VERSION = "0.8.5"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -192,6 +192,53 @@ def send_ha_notification(service, title, message):
             data["data"] = {"url": "/hassio/ingress/" + addon_slug(),
                             "tag": "deye_ai_tesla_charge_reminder"}
         return ha_request("/services/notify/" + str(service), "POST", data)
+
+
+def maybe_notify_control_fault():
+    """Independent of inverter access; persist successful alerts across restarts."""
+    state_path=DATA_DIR/'automatic_control.json'
+    alert_path=DATA_DIR/'control_alerts.json'
+    try:
+        state=json.loads(state_path.read_text())
+    except (FileNotFoundError,json.JSONDecodeError):
+        return
+    status=state.get('status')
+    if status not in ('fault','restore_failed','restoring','verifying_restore'):
+        return
+    reason=state.get('stop_reason') or state.get('error') or ''
+    if status in ('restoring','verifying_restore') and not state.get('error') and not str(reason).startswith(('fault:','worker_fault:')):
+        return
+    phase='restored' if state.get('restored') else 'manual' if status=='restore_failed' else 'stopping'
+    key=json.dumps([state.get('started'),reason,phase],ensure_ascii=False)
+    try: ledger=json.loads(alert_path.read_text())
+    except (FileNotFoundError,json.JSONDecodeError): ledger={'sent':[]}
+    if key in ledger.get('sent',[]):return
+    if time.time()-ledger.get('last_attempt',0)<300:return
+    ledger['last_attempt']=time.time()
+    alert_path.write_text(json.dumps(ledger,ensure_ascii=False))
+    service=energy_plan().get('tesla_notify_service','')
+    if not service or not re.fullmatch(r'mobile_app_[a-z0-9_]+',str(service)):
+        print('Control alert: vælg telefonmodtager under Tesla-planen.',flush=True);return
+    result={'restored':'Oprindelige indstillinger er gendannet og efterkontrolleret. Automatikken er stoppet.',
+            'manual':'Gendannelse er IKKE bekræftet. Kontrollér inverteren manuelt. Automatikken er stoppet.',
+            'stopping':'Automatikken stopper og forsøger gendannelse. Afvent slutstatus i Bridge.'}[phase]
+    message=result+' Fejl: '+str(reason)[:1000]
+    ha_request('/services/notify/'+service,'POST',{'title':'Deye AI · fejl i automatisk styring','message':message,
+        'data':{'tag':'deye_ai_control_fault','url':'/hassio/ingress/'+addon_slug()}})
+    ledger.setdefault('sent',[]).append(key);ledger['sent']=ledger['sent'][-100:]
+    ledger['last_message']=message;ledger['sent_at']=datetime.now(timezone.utc).isoformat()
+    ledger['last_attempt']=0
+    alert_path.write_text(json.dumps(ledger,ensure_ascii=False))
+    try:
+        ha_request('/services/persistent_notification/create','POST',{'title':'Deye AI · styringsfejl','message':message,'notification_id':'deye_ai_control_fault'})
+    except Exception as exc:print('Control alert mirror failed: %s'%exc,flush=True)
+
+
+def control_alert_worker():
+    while True:
+        try:maybe_notify_control_fault()
+        except Exception as exc:print('Control phone notification failed: %s'%exc,flush=True)
+        time.sleep(5)
 
 
 def addon_slug():
@@ -1562,4 +1609,5 @@ if __name__ == "__main__":
     threading.Thread(target=TEST_SUITE.worker, args=(TWENTY_TEST,), daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
     threading.Thread(target=AUTO_CONTROL.worker,daemon=True).start()
+    threading.Thread(target=control_alert_worker,daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
