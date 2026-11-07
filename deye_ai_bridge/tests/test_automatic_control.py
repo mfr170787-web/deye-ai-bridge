@@ -54,6 +54,15 @@ class ControllerTests(unittest.TestCase):
         for _ in range(13):self.advance(5);self.c.tick()
         self.assertTrue(self.c.state()['restored']);self.assertEqual(self.c.owned(),self.original)
 
+    def test_transient_readback_requires_two_fresh_matches_without_write(self):
+        self.c.enable(True)
+        state=self.c.state();current=self.c.owned();current['108']=85
+        writes=len(self.writes)
+        self.c.check_owned(state,current)
+        self.assertEqual(current,state['expected'])
+        self.assertEqual(len(self.writes),writes)
+        self.assertEqual(state['events'][-1]['kind'],'readback_recovered')
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
