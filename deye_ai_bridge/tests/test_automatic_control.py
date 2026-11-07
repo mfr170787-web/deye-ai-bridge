@@ -63,6 +63,27 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(self.writes),writes)
         self.assertEqual(state['events'][-1]['kind'],'readback_recovered')
 
+    def test_resume_only_after_verified_read_timeout(self):
+        self.c.enable(True)
+        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        self.assertTrue(self.c.state()['restored'])
+        self.c.tick()
+        self.assertEqual(self.c.state()['status'],'active')
+        self.assertTrue(any(e['kind']=='auto_resume_ready' for e in self.c.state()['events']))
+
+    def test_manual_stop_cancels_pending_resume(self):
+        self.c.enable(True)
+        self.c.disable('fault: Modbus read, register 148: ConnectionError')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        self.c.disable();self.c.tick()
+        self.assertNotEqual(self.c.state()['status'],'active')
+        self.assertFalse(self.c.state().get('auto_resume'))
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
