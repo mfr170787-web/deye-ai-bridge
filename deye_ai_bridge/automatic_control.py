@@ -142,7 +142,18 @@ class AutomaticControl:
 
     def check_owned(self,s,current):
         expected=s['expected'];pending=s.get('pending') or {}
-        if any(v not in (expected[a],pending.get(a,expected[a])) for a,v in current.items()):
+        def mismatch(values):
+            return any(v not in (expected[a],pending.get(a,expected[a])) for a,v in values.items())
+        if mismatch(current):
+            # Fresh reads only: never repeat an ambiguous write.
+            confirmed=0
+            for _ in range(4):
+                time.sleep(.5)
+                fresh=self.owned()
+                confirmed=0 if mismatch(fresh) else confirmed+1
+                current.clear();current.update(fresh)
+                if confirmed>=2:
+                    self.log(s,'readback_recovered');self.save(s);return
             self.log(s,'external_change',values=current);self.save(s)
             raise ValueError('Indstillinger ændret uden for styringen; automatisk overskrivning er blokeret.')
 
