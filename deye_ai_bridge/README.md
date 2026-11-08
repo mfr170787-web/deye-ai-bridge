@@ -8,7 +8,7 @@ Lokal pris- og solbaseret styring af husbatteriet via Home Assistant og EW11.
 - Planen prioriterer soloverskud, billige netpriser og batteriforbrug i dyre timer. Mellemdyre timer må kun bruge energi over den beregnede fremtidige husreserve.
 - **Deaktivér og gendan** stopper planstyringen og skriver de oprindelige strømgrænser samt alle gemte TOU-tider, SOC-mål og ladeflag tilbage. Inverterens oprindelige drift kan derefter fortsætte; knappen slukker ikke inverteren.
 - Alle seks TOU-perioder anvender den aktuelle handling. Tidsgrænserne er faste 00/04/08/12/16/20 under styring; den løbende plan bestemmer handlingen, også over midnat.
-- Maksimalt 90 A samlet batteriladning og afladning; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 4500 W. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
+- Maksimalt 150 A samlet batteriladning; afladning fortsat højst 90 A; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 9000 W opladning og 4500 W afladning. Den tidligere standard på 4500 W opladning hæves én gang til 9000 W i 0.8.11; brugerdefinerede lavere grænser bevares. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
 - Reservehold stopper afladning; soloverskud kan fortsat oplade. Netladning bruger periodens beregnede SOC-mål. Ved mål-SOC begrænses ladning med hysterese.
 - Der ændres ikke på BMS-grænser, Remote-mode, eksporttilstand, batterispændinger eller sikkerhedsindstillinger. Zero Export, Solar Sell fra og SOC/TOU skal allerede være korrekt indstillet.
 - Når Tesla lader, eller dens effekt er ukendt, beskyttes den beregnede husreserve også mod batteriforbrug til bilen. Tesla startes og stoppes ikke af denne version.
@@ -26,7 +26,7 @@ Aktivering kræver friske målinger, aktuelle Andel-priser inklusive transport/a
 
 ## Fejl og genstart
 
-Uventede aflæsninger, ændringer fra anden styring, forældede data eller ladeeffekt over softwaregrænsen 5500 W stopper styringen og udløser forsøg på gendannelse. Skriveintention og oprindelige værdier gemmes før hardwarekommandoer. Der foretages ingen automatisk gentagelse af en tvetydig skrivning.
+Uventede aflæsninger, ændringer fra anden styring, forældede data eller ladeeffekt over softwaregrænsen 9500 W eller 165 A stopper styringen og udløser forsøg på gendannelse. Skriveintention og oprindelige værdier gemmes før hardwarekommandoer. Absolutte indstillinger kan gentages højst tre gange efter friske registerkontroller; ukendte værdier blokerer gentagelse.
 
 Ved ændringer fra anden styring overskrives fremmede værdier ikke. Egne strømgrænser forsøges sat til nul, når gendannelse er blokeret, og der kræves manuel kontrol. Der skrives aldrig til en anden inverter efter ændring af forbindelsen.
 
