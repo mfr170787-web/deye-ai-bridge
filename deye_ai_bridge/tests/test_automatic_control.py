@@ -125,6 +125,33 @@ class ControllerTests(unittest.TestCase):
         self.assertLessEqual(sum(a==172 for a,v in self.writes),3)
         self.assertNotEqual(self.c.state()['status'],'active')
 
+    def clock_with_drift(self,seconds):
+        self.drift=seconds
+        read=self.c.read;write=self.c.write
+        def clock_read(address,count):
+            if address!=62:return read(address,count)
+            d=(self.now+timedelta(seconds=self.drift)).astimezone(mod.TZ)
+            return [dict(address=a,uint16=v) for a,v in enumerate([((d.year-2000)<<8)|d.month,(d.day<<8)|d.hour,(d.minute<<8)|d.second],62)]
+        def clock_write(address,values):
+            if address!=62:return write(address,values)
+            self.assertTrue(mod.valid_write(address,values));self.writes.append((address,values));self.drift=0
+        self.c.read=clock_read;self.c.write=clock_write
+
+    def test_clock_accepts_under_two_minutes_without_writes(self):
+        self.clock_with_drift(-90)
+        self.assertAlmostEqual(self.c.clock(),-90)
+        self.assertFalse(self.writes)
+
+    def test_clock_sync_confirms_and_limits_to_once_daily(self):
+        self.clock_with_drift(-180)
+        self.assertLess(abs(self.c.clock()),10)
+        self.assertEqual(len(self.writes),1)
+        self.drift=-180
+        with self.assertRaises(ValueError):self.c.clock()
+        self.assertEqual(len(self.writes),1)
+        record=json.loads(self.c.path.with_name('clock_sync.json').read_text())
+        self.assertEqual(record['status'],'confirmed')
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
