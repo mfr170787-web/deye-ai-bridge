@@ -161,8 +161,8 @@ class AutomaticControl:
         power=raw_w-65536 if raw_w>32767 else raw_w
         if not 4000<=voltage<=6000 or not 0<=soc<=100:
             raise ValueError('Ugyldig batterispænding/SOC.')
-        if power < -5500:
-            raise ValueError('Ladeeffekt over softwaregrænsen 5500 W.')
+        if power < -9500 or -power/(voltage/100 if voltage else 1)>165:
+            raise ValueError('Opladning over softwaregrænsen 9500 W eller 165 A.')
         delta=self.clock(strict)
         floor=max(15,int(plan['minimum_soc_morning']),context[115]+1,context[117])
         maximum=int(plan['target_soc'])
@@ -257,7 +257,7 @@ class AutomaticControl:
     def apply(self,s,ctx,row,c,m,floor,maximum):
         if s['endpoint']!=list(self.endpoint()):raise ValueError('Inverterforbindelsen er ændret.')
         plan=ctx['plan'];soc=m['soc'];voltage=m['voltage_v'];action=row['action']
-        charge=min(90,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
+        charge=min(150,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
         discharge=min(90,c[213],max(0,int(float(plan['max_discharge_w'])/voltage)))
         if soc>=maximum:s['charge_paused']=True
         elif soc<=maximum-2:s['charge_paused']=False
