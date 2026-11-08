@@ -152,6 +152,21 @@ class ControllerTests(unittest.TestCase):
         record=json.loads(self.c.path.with_name('clock_sync.json').read_text())
         self.assertEqual(record['status'],'confirmed')
 
+    def test_charge_150a_and_lower_bms_limit(self):
+        self.plan['max_charge_w']=9000
+        self.c.enable(True)
+        self.assertEqual((self.r[108],self.r[128]),(150,150))
+        self.r[212]=120;self.c.tick()
+        self.assertEqual((self.r[108],self.r[128]),(120,120))
+        self.action='use_battery';self.c.tick()
+        self.assertLessEqual(self.r[109],90)
+
+    def test_charge_current_software_trip(self):
+        self.plan['max_charge_w']=9000;self.c.enable(True)
+        self.r[590]=65536-9000
+        self.c.tick();self.verify_restore()
+        self.assertEqual(self.c.state()['status'],'fault')
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
@@ -197,7 +212,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_bms_and_effect_checks(self):
         self.r[212]=50;self.c.enable(True);self.assertEqual(self.r[108],50)
-        self.r[590]=65536-5600;self.c.tick();self.verify_restore();self.assertEqual(self.c.state()['status'],'fault')
+        self.r[590]=65536-10000;self.c.tick();self.verify_restore();self.assertEqual(self.c.state()['status'],'fault')
 
     def test_disable_cancels_pending_enable(self):
         original=self.c.context
