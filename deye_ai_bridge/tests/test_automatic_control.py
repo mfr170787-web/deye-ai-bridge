@@ -108,6 +108,23 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(self.writes),writes)
         self.assertFalse(self.c.state()['auto_resume'])
 
+    def test_first_write_ignored_is_retried_after_fresh_read(self):
+        original=self.c.write;ignored=[]
+        def flaky(address,values):
+            if address==148 and not ignored:
+                ignored.append(True);self.writes.append((address,list(values)));return
+            original(address,values)
+        self.c.write=flaky;self.c.enable(True)
+        self.assertEqual(self.c.state()['status'],'active')
+        self.assertEqual(sum(a==148 for a,v in self.writes),2)
+        self.assertTrue(any(e['kind']=='write_retry' for e in self.c.state()['events']))
+
+    def test_persistent_ignored_write_is_bounded(self):
+        self.ignore=True
+        with self.assertRaises(ValueError):self.c.enable(True)
+        self.assertLessEqual(sum(a==172 for a,v in self.writes),3)
+        self.assertNotEqual(self.c.state()['status'],'active')
+
     def test_enable_no_chatter_and_disable(self):
         self.c.enable(True);self.assertEqual(self.c.state()['status'],'active')
         self.assertEqual((self.r[108],self.r[109],self.r[128]),(86,0,86))
@@ -136,8 +153,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_partial_timeout_and_ignored_write(self):
         self.fail=148
-        with self.assertRaises(TimeoutError):self.c.enable(True)
-        self.verify_restore();self.assertEqual(self.c.state()['status'],'fault')
+        self.c.enable(True)
+        self.assertEqual(self.c.state()['status'],'active')
+        self.assertEqual(sum(a==148 for a,v in self.writes),1)
 
     def test_foreign_edit_cancels_owned_currents_without_chasing(self):
         self.c.enable(True);self.r[169]=77;self.c.tick()
