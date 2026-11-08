@@ -82,7 +82,7 @@ def decode(raw, clock_reference=None, errors=None):
         'read_errors': errors or [],
         'clock': {'inverter_local':clock,'reference_local':clock_reference.isoformat() if clock_reference else None,
                   'offset_seconds':offset,'warning':offset is not None and abs(offset)>120,
-                  'error':clock_error,'basis':'Inverterens ur fortolkes som dansk lokal tid; ingen tidskorrektion udføres.'},
+                  'error':clock_error,'basis':'Inverterens ur fortolkes som dansk lokal tid; overvågningen læser kun; aktiv automatik kan synkronisere ved bekræftet afvigelse på mindst 120 sekunder.'},
         'remote': {'mode':scalar(1100),'watchdog_raw':wd,
                    'watchdog_disabled':None if wd is None else wd==65535,
                    'watchdog_seconds':None if wd==65535 else wd,
@@ -140,7 +140,7 @@ class ClockDiagnostics:
             record.update(raw_registers={str(k): v for k,v in raw.items()},
                           read_seconds=(after-before).total_seconds(),
                           clock=decode(raw, before+(after-before)/2)['clock'])
-            record['anomaly'] = record['clock']['error'] is not None or abs(record['clock']['offset_seconds'] or 0)>60
+            record['anomaly'] = record['clock']['error'] is not None or abs(record['clock']['offset_seconds'] or 0)>=120
         except Exception as exc:
             record.update(error=str(exc), anomaly=True)
         with self.lock:
@@ -161,7 +161,7 @@ class ClockDiagnostics:
             result = dict(running=self.running, interval_seconds=5, retention_hours=24,
                           count=count, anomaly_count=anomalies,
                           latest=records[-1] if records else None, error=self.last_error,
-                          note='Kun aflæsning af 62–64. Afvigelser over 60 sekunder udløser to ekstra aflæsninger; ingen tidskorrektion eller ændring af testens stopkontrol. Data bevares over genstart i op til 24 timer, højst 20000 aflæsninger.')
+                          note='Kun aflæsning af 62–64. Afvigelser på mindst 120 sekunder udløser to ekstra aflæsninger; ingen tidskorrektion eller ændring af testens stopkontrol. Data bevares over genstart i op til 24 timer, højst 20000 aflæsninger.')
             if include_samples:
                 result['samples'] = records
             return result
