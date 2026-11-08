@@ -24,6 +24,13 @@ def stamp(value):
 def valid_write(address, values):
     if type(values) is not list or not values:
         return False
+    if address==62:
+        if len(values)!=3 or any(type(v) is not int or not 0<=v<=65535 for v in values):return False
+        try:
+            a,b,c=values
+            target=datetime(2000+(a>>8),a&255,b>>8,b&255,c>>8,c&255,tzinfo=TZ)
+            return abs((target-datetime.now(TZ)).total_seconds())<=10
+        except ValueError:return False
     for a,v in enumerate(values,address):
         if type(v) is not int:
             return False
@@ -80,24 +87,47 @@ class AutomaticControl:
         return {str(a):v for start,count in GROUPS for a,v in zip(range(start,start+count),self.values(start,count))}
 
     def clock(self,strict=True):
-        consecutive=0;deadline=time.monotonic()+5
+        offsets=[];consecutive=0;deadline=time.monotonic()+14
+        sync_path=self.path.with_name('clock_sync.json')
         for i in range(8):
             if i:
                 if time.monotonic()>=deadline:break
-                time.sleep(.5)
-            before=datetime.now(TZ)
-            a,b,c=self.values(62,3)
-            after=datetime.now(TZ)
+                time.sleep(2)
+            before=datetime.now(TZ);a,b,c=self.values(62,3);after=datetime.now(TZ)
             dt=datetime(2000+(a>>8),a&255,b>>8,b&255,c>>8,c&255,tzinfo=TZ)
             delta=(dt-(before+(after-before)/2)).total_seconds()
-            if abs(delta)<=60:
+            if abs(delta)<120:
                 consecutive+=1
                 if i==0 or consecutive>=2:return delta
             else:
-                consecutive=0
-                if strict or not -3660<=delta<=-3540:
-                    raise ValueError('Inverteruret er ikke stabilt inden for ét minut.')
-        raise ValueError('Inverteruret blev ikke bekræftet stabilt.')
+                consecutive=0;offsets.append(delta)
+                if len(offsets)>=3 and max(offsets[-3:])-min(offsets[-3:])<=5:
+                    old=json.loads(sync_path.read_text()) if sync_path.exists() else {}
+                    if time.time()-old.get('attempt_at',0)<86400:
+                        raise ValueError('Ur synkroniseret/forsøgt inden for 24 timer; afvigelsen er igen mindst to minutter.')
+                    state=self.state()
+                    if state.get('endpoint') and state['endpoint']!=list(self.endpoint()):raise ValueError('Forbindelsen er ændret; ingen urskrivning.')
+                    now=datetime.now(TZ)
+                    values=[((now.year-2000)<<8)|now.month,(now.day<<8)|now.hour,(now.minute<<8)|now.second]
+                    record=dict(attempt_at=time.time(),target=now.isoformat(),offset_before=delta,status='requested')
+                    sync_path.write_text(json.dumps(record))
+                    try:
+                        self.write(62,values)
+                    except Exception as exc:
+                        # Missing acknowledgement is resolved by reads; never blindly repeat.
+                        record['reply_error']=str(exc)
+                    matches=0
+                    for _ in range(6):
+                        time.sleep(1);ref=datetime.now(TZ);x,y,z=self.values(62,3)
+                        actual=datetime(2000+(x>>8),x&255,y>>8,y&255,z>>8,z&255,tzinfo=TZ)
+                        residual=(actual-ref).total_seconds()
+                        matches=matches+1 if abs(residual)<=10 else 0
+                        if matches>=2:
+                            record.update(status='confirmed',offset_after=residual);sync_path.write_text(json.dumps(record))
+                            return residual
+                    record['status']='failed';sync_path.write_text(json.dumps(record))
+                    raise ValueError('Synkronisering af inverteruret blev ikke bekræftet.')
+        raise ValueError('Inverteruret kunne ikke bekræftes inden for to minutter.')
 
     def guards(self,ctx,strict=False):
         cfg=ctx['options'];plan=ctx['plan'];now=datetime.now(timezone.utc)
