@@ -163,16 +163,37 @@ class AutomaticControl:
         desired={str(a):v for a,v in enumerate(values,address)}
         if all(current[a]==v for a,v in desired.items()):return
         expected=dict(s['expected']);expected.update(desired)
-        s['pending']=desired
-        self.log(s,'write_requested',address=address,values=values);self.save(s)
-        self.write(address,values)  # Never automatically retry an ambiguous write.
-        deadline=time.monotonic()+10
-        while True:
+        s['pending']=desired;self.save(s)
+        last_error=None
+        for attempt in range(3):
+            if s['endpoint']!=list(self.endpoint()):raise ValueError('Forbindelsen er ændret.')
+            # Every repeat is an idempotent absolute assignment, guarded by fresh reads.
             current=self.owned();self.check_owned(s,current)
-            if current==expected:
-                s.update(expected=expected,pending=None);self.save(s);return
-            if time.monotonic()>=deadline:raise ValueError('Kommando ikke tilbagelæst inden 10 sekunder.')
-            time.sleep(.5)
+            if current!=expected:
+                self.log(s,'write_requested' if attempt==0 else 'write_retry',address=address,values=values,attempt=attempt+1);self.save(s)
+                try:self.write(address,values)
+                except (TimeoutError,ConnectionError,OSError,RuntimeError) as exc:
+                    if isinstance(exc,RuntimeError) and not isinstance(exc.__cause__,(TimeoutError,ConnectionError,OSError)) and not any(t in str(exc) for t in ('TimeoutError','ConnectionError')):raise
+                    last_error=exc
+                    self.log(s,'write_reply_missing',address=address,error=str(exc));self.save(s)
+            deadline=time.monotonic()+10;stable_since=None;matches=0
+            while True:
+                try:
+                    current=self.owned();self.check_owned(s,current)
+                    if current==expected:
+                        matches+=1
+                        if stable_since is None:stable_since=time.monotonic()
+                        if matches>=3 and time.monotonic()-stable_since>=2:
+                            s.update(expected=expected,pending=None);self.save(s);return
+                    else:stable_since=None;matches=0
+                except (TimeoutError,ConnectionError,OSError,RuntimeError) as exc:
+                    if isinstance(exc,RuntimeError) and not isinstance(exc.__cause__,(TimeoutError,ConnectionError,OSError)) and not any(t in str(exc) for t in ('TimeoutError','ConnectionError')):raise
+                    last_error=exc;stable_since=None;matches=0
+                if time.monotonic()>=deadline:break
+                time.sleep(.5)
+            # A further attempt begins with a new full register check. Unknown values abort.
+        if last_error:raise last_error
+        raise ValueError('Kommando ikke stabilt tilbagelæst efter tre forsøg.')
 
     def enable(self,ack):
         if ack is not True:raise ValueError('Bekræft at Copilot/cloudlogger er frakoblet.')
