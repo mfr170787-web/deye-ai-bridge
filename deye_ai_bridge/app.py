@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.11"
+APP_VERSION = "0.8.12"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -203,12 +203,13 @@ def maybe_notify_control_fault():
     except (FileNotFoundError,json.JSONDecodeError):
         return
     status=state.get('status')
-    if status not in ('fault','restore_failed','restoring','verifying_restore'):
+    # Recovery and its first attempts are silent. Alert only a terminal stop.
+    if status not in ('fault','restore_failed') or state.get('auto_resume'):
         return
     reason=state.get('stop_reason') or state.get('error') or ''
-    if status in ('restoring','verifying_restore') and not state.get('error') and not str(reason).startswith(('fault:','worker_fault:')):
+    if not str(reason).startswith(('fault:','worker_fault:')) and not state.get('error'):
         return
-    phase='restored' if state.get('restored') else 'manual' if status=='restore_failed' else 'stopping'
+    phase='restored' if state.get('restored') else 'manual'
     key=json.dumps([state.get('started'),reason,phase],ensure_ascii=False)
     try: ledger=json.loads(alert_path.read_text())
     except (FileNotFoundError,json.JSONDecodeError): ledger={'sent':[]}
@@ -219,9 +220,8 @@ def maybe_notify_control_fault():
     service=energy_plan().get('tesla_notify_service','')
     if not service or not re.fullmatch(r'mobile_app_[a-z0-9_]+',str(service)):
         print('Control alert: vælg telefonmodtager under Tesla-planen.',flush=True);return
-    result={'restored':'Oprindelige indstillinger er gendannet og efterkontrolleret. Automatikken er stoppet.',
-            'manual':'Gendannelse er IKKE bekræftet. Kontrollér inverteren manuelt. Automatikken er stoppet.',
-            'stopping':'Automatikken stopper og forsøger gendannelse. Afvent slutstatus i Bridge.'}[phase]
+    result={'restored':'Automatikken kunne ikke genoptages automatisk. Oprindelige indstillinger er gendannet og efterkontrolleret. Kontrollér Bridge.',
+            'manual':'Automatikken kunne ikke genoptages automatisk, og gendannelse er IKKE bekræftet. Kontrollér inverteren manuelt.'}[phase]
     message=result+' Fejl: '+str(reason)[:1000]
     ha_request('/services/notify/'+service,'POST',{'title':'Deye AI · fejl i automatisk styring','message':message,
         'data':{'tag':'deye_ai_control_fault','url':'/hassio/ingress/'+addon_slug()}})
