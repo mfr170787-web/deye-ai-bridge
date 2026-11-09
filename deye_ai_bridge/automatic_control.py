@@ -421,7 +421,8 @@ class AutomaticControl:
                     if previous is not None and current!=previous:raise ValueError('Registre er ikke stabile efter forbindelsesfejl.')
                     previous=current;time.sleep(.5)
                 attempts=[t for t in s.get('restore_retry_attempts',[]) if time.time()-t<3600]
-                if len(attempts)>=3:return
+                if len(attempts)>=3:
+                    s['auto_resume']=False;self.log(s,'restore_retry_blocked',reason='Tre gendannelsesforsøg inden for en time.');self.save(s);return
                 attempts.append(time.time());s['restore_retry_attempts']=attempts
                 self.log(s,'communication_restored_retry');self.save(s)
                 self.disable(s['stop_reason'])
