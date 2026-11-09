@@ -167,18 +167,62 @@ class ControllerTests(unittest.TestCase):
         record=json.loads(self.c.path.with_name('clock_sync.json').read_text())
         self.assertEqual(record['status'],'confirmed')
 
-    def test_charge_150a_and_lower_bms_limit(self):
-        self.plan['max_charge_w']=9000
+    def test_charge_190a_and_lower_bms_limit(self):
+        self.plan['max_charge_w']=11000
         self.c.enable(True)
-        self.assertEqual((self.r[108],self.r[128]),(150,150))
+        self.assertEqual((self.r[108],self.r[128]),(190,190))
         self.r[212]=120;self.c.tick()
         self.assertEqual((self.r[108],self.r[128]),(120,120))
         self.action='use_battery';self.c.tick()
         self.assertLessEqual(self.r[109],90)
 
+    def test_charge_window_uses_lower_current_when_time_allows(self):
+        ctx=self.context();row=ctx['optimization']['hours'][0]
+        row.update(battery_power_w=-4000,charge_target_soc=45,projected_soc=45)
+        second=dict(row,time=(self.now+timedelta(hours=1)).isoformat(),charge_target_soc=60,projected_soc=60)
+        ctx['optimization']['hours'].append(second)
+        amps,target=mod.charge_window_request(ctx,row,30,52)
+        self.assertEqual(target,60)
+        self.assertTrue(100<=amps<=110)
+        # A short window needs the ceiling; apply() still clamps the request.
+        self.advance(110*60)
+        amps,_=mod.charge_window_request(ctx,{**row},30,52)
+        self.assertGreater(amps,190)
+
+    def test_voltage_jitter_does_not_rewrite_current_or_grid_flags(self):
+        self.plan['max_charge_w']=8000;self.c.enable(True)
+        previous=self.r[108];self.writes=[]
+        self.r[587]=5310;self.c.tick()
+        self.assertEqual(self.r[108],previous)
+        self.assertFalse(any(a==172 for a,v in self.writes))
+
+    def test_successful_reconnects_do_not_exhaust_restart_budget(self):
+        self.c.enable(True)
+        for _ in range(4):
+            self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+            for _ in range(20):
+                self.advance(5);self.c.tick()
+                if self.c.state().get('restored'):break
+            self.c.tick()
+            self.assertEqual(self.c.state()['status'],'active')
+            self.assertEqual(self.c.state()['resume_attempts'],[])
+
+    def test_failed_restart_budget_cools_down_then_recovers(self):
+        self.c.enable(True)
+        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        state=self.c.state();state['resume_attempts']=[self.now.timestamp()]*3;self.c.save(state)
+        self.c.tick();self.assertTrue(self.c.state()['auto_resume'])
+        self.assertTrue(self.c.state()['recovery_exhausted'])
+        self.advance(901)
+        for _ in range(4):self.c.tick();self.advance(15)
+        self.assertEqual(self.c.state()['status'],'active')
+
     def test_charge_current_software_trip(self):
-        self.plan['max_charge_w']=9000;self.c.enable(True)
-        self.r[590]=65536-9000
+        self.plan['max_charge_w']=11000;self.c.enable(True)
+        self.r[590]=65536-11500
         self.c.tick();self.verify_restore()
         self.assertEqual(self.c.state()['status'],'fault')
 
@@ -227,7 +271,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_bms_and_effect_checks(self):
         self.r[212]=50;self.c.enable(True);self.assertEqual(self.r[108],50)
-        self.r[590]=65536-10000;self.c.tick();self.verify_restore();self.assertEqual(self.c.state()['status'],'fault')
+        self.r[590]=65536-12500;self.c.tick();self.verify_restore();self.assertEqual(self.c.state()['status'],'fault')
 
     def test_disable_cancels_pending_enable(self):
         original=self.c.context
