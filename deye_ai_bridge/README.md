@@ -60,3 +60,6 @@ Telefonbesked om automatisk styring sendes kun ved endeligt stop, når automatis
 
 ### 0.8.13
 Husplanen beregner nu samlet importpris på tværs af alle sammenhængende kendte pristimer (op til 48 timer), inklusive ladetab, SOC- og effektgrænser. Billig nat kan dække både morgen og dyr aften i stedet for en dyrere middagsladning. Sol krediteres fortsat 70 %, husforbruget tillægges den valgte procentvise sikkerhedsmargin. Energi fordeles i trin på 0,25 kWh; dette er en prognosebaseret beregning, ikke en garanti for faktisk forbrug. Ukendte prisperioder anvendes ikke som ladevinduer. Modellen begrænses også af de aktuelle BMS-strømgrænser og 150 A ladning / 90 A afladning. Scanner, logger, gendannelse og tavse automatiske genforsøg bevares.
+
+### 0.8.14
+Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet, mens aktivering endnu læste og kontrollerede inverteren. Fejlbeskeder kunne derfor blive sendt ved vellykket genstart. Genoptagelse forbliver nu markeret som igangværende indtil aktiveringen er journalført. Beskedhistorikken medtages i analysepakken for at kunne kontrollere faktisk afsendelse.
