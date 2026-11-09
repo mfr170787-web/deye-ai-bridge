@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.13"
+APP_VERSION = "0.8.14"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -1219,6 +1219,7 @@ def analysis_package(days=7):
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
         "automatic_control.json": AUTO_CONTROL.report(),
+        "control_alerts.json": json.loads((DATA_DIR / "control_alerts.json").read_text()) if (DATA_DIR / "control_alerts.json").exists() else {},
         "clock_sync.json": json.loads((DATA_DIR / "clock_sync.json").read_text()) if (DATA_DIR / "clock_sync.json").exists() else {},
         "two_day_plan.json": DAY_PLANS.view(optimization,samples,AUTO_CONTROL.report().get("events",[])),
         "pilot_validation.json": {"automatic_control": AUTO_CONTROL.state().get("status")=="active", "records": pilot_records()},
