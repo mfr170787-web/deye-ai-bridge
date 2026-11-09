@@ -448,7 +448,9 @@ class AutomaticControl:
                     if self.owned()!=s['baseline']:raise ValueError('Gendannede registre afviger.')
                     time.sleep(.5)
                 self.guards(self.context(),True)
-                self.log(s,'auto_resume_ready');s['auto_resume']=False;self.save(s)
+                # Keep recovery pending until enable() persists its enabling state.
+                # Clearing it here exposed a false terminal fault to the notifier.
+                self.log(s,'auto_resume_ready');self.save(s)
                 self.enable(True)
             except Exception as exc:
                 current=self.state()
