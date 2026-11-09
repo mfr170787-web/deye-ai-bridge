@@ -1,5 +1,6 @@
 """Pure, read-only forecasting helpers. No device commands or network calls."""
 import math
+import json
 from datetime import datetime, timedelta
 
 
@@ -116,3 +117,108 @@ def charge_schedule(sample, prices, plan, now):
             'departure': departure.isoformat(), 'arrival': arrival.isoformat(),
             'plug_in_by': plug.isoformat(), 'price_hours_available': len(candidates),
             'prices_complete': complete, 'status': status, 'selected_hours': selected}
+
+
+def economic_dispatch(slots, plan, initial_soc):
+    """Minimize import cost across all contiguous known hours, without exports.
+
+    Battery energy is discretized at 0.25 kWh (including exact bounds and initial
+    energy). Every transition conserves energy including charge/discharge loss.
+    Unknown price gaps end the horizon; they are never treated as cheap hours.
+    """
+    if not slots:
+        return []
+    horizon=[]
+    for slot in slots:
+        if horizon and slot['time']-horizon[-1]['time'] != timedelta(hours=1):
+            break
+        horizon.append(slot)
+    capacity=float(plan['battery_capacity_kwh'])
+    eta=(float(plan['roundtrip_efficiency_percent'])/100)**.5
+    floor=capacity*float(plan['minimum_soc_morning'])/100
+    ceiling=capacity*float(plan['target_soc'])/100
+    initial=max(0., min(capacity, float(initial_soc)*capacity/100))
+    # Initial energy above the configured target may still be used, never topped up.
+    upper=max(ceiling,initial)
+    lower=min(floor,initial)
+    levels=sorted(set([round(lower,8),round(floor,8),round(ceiling,8),round(initial,8)] +
+                      [round(i*.25,8) for i in range(math.ceil(lower/.25),math.floor(upper/.25)+1)]))
+    initial_index=min(range(len(levels)),key=lambda j:abs(levels[j]-initial))
+    # Load margin protects against forecast error; PV credit stays at 70 percent.
+    margin=1+float(plan.get('reserve_margin_percent',15))/100
+    costs={initial_index:0.}
+    parents=[]
+    for slot in horizon:
+        fraction=float(slot['fraction'])
+        deficit=(float(slot['load'])*margin-float(slot['pv'])*.7)*fraction
+        charge_limit=float(plan['max_charge_w'])/1000*fraction*eta
+        discharge_limit=min(float(plan['max_discharge_w'])/1000*fraction,max(0.,deficit))/eta
+        next_costs={};back={}
+        for i,cost in costs.items():
+            before=levels[i]
+            for j,after in enumerate(levels):
+                change=after-before
+                if change>charge_limit+1e-8 or -change>discharge_limit+1e-8:
+                    continue
+                if change>1e-8 and after>ceiling+1e-8:
+                    continue
+                if change < -1e-8 and after<floor-1e-8:
+                    continue
+                ac=change/eta if change>=0 else change*eta
+                imported=max(0.,deficit+ac)
+                # Small throughput cost avoids pointless cycling at equal prices.
+                total=cost+imported*float(slot['price'])+abs(change)*.02
+                if total<next_costs.get(j,float('inf'))-1e-9:
+                    next_costs[j]=total;back[j]=i
+        parents.append(back);costs=next_costs
+    end=min(costs,key=lambda j:(costs[j]-.03*levels[j],levels[j]))
+    path=[end]
+    for back in reversed(parents):
+        end=back[end];path.append(end)
+    path.reverse()
+    rows=[]
+    for k,slot in enumerate(horizon):
+        before,after=levels[path[k]],levels[path[k+1]]
+        change=after-before;fraction=float(slot['fraction'])
+        deficit=(float(slot['load'])*margin-float(slot['pv'])*.7)*fraction
+        ac=change/eta if change>=0 else change*eta
+        grid_charge=change>1e-7 and deficit+ac>max(0.,deficit)+1e-7
+        action=('grid_charge' if grid_charge else 'solar_charge') if change>1e-7 else ('use_battery' if change< -1e-7 else 'hold')
+        reason={'grid_charge':'Lad i de billigste rentable timer i hele den kendte prisperiode til kommende husforbrug.',
+                'solar_charge':'Gem forventet soloverskud til senere husforbrug.',
+                'use_battery':'Brug batteriet nu ifølge samlet prisplan; energi til dyrere timer er afsat.',
+                'hold':'Gem batteriet til de timer, hvor det sparer mest.'}[action]
+        # Reserve the planned consumption until the next scheduled refill.
+        need=0.
+        for m in range(k+1,len(horizon)):
+            delta=levels[path[m+1]]-levels[path[m]]
+            if delta>1e-7:break
+            need+=max(0.,-delta)
+        protected=min(upper,floor+need)/capacity*100
+        target=after/capacity*100
+        rows.append({'time':slot['time'].isoformat(),'price_dkk_kwh':round(slot['price'],4),
+                     'pv_forecast_kwh':round(slot['pv']*fraction,2),
+                     'load_forecast_kwh':round(slot['load']*fraction,2),
+                     'action':action,'charge_target_soc':round(target,1),
+                     'discharge_floor_soc':round(protected,1),
+                     'battery_power_w':round(-ac/max(fraction,.001)*1000),
+                     'projected_soc':round(target,1),'reserve_soc':round(protected,1),
+                     'reason':reason})
+    return rows
+
+
+def power_limited_plan(plan, sample):
+    """Forecast with the same current ceilings as the actual controller."""
+    limited=dict(plan)
+    try:
+        raw=json.loads(sample.get('telemetry_json') or '{}').get('raw_registers',{})
+        voltage=float(raw.get('587',5000))/100
+        if not 40<=voltage<=60:voltage=50.
+        charge=float(raw.get('212',150));discharge=float(raw.get('213',90))
+        if not 0<=charge<=500:charge=0
+        if not 0<=discharge<=500:discharge=0
+    except (ValueError,TypeError,AttributeError):
+        voltage,charge,discharge=50.,150.,90.
+    limited['max_charge_w']=min(float(plan['max_charge_w']),min(150,charge)*voltage)
+    limited['max_discharge_w']=min(float(plan['max_discharge_w']),min(90,discharge)*voltage)
+    return limited
