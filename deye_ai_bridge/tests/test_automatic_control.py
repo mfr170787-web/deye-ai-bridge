@@ -74,6 +74,21 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.c.state()['status'],'active')
         self.assertTrue(any(e['kind']=='auto_resume_ready' for e in self.c.state()['events']))
 
+    def test_resume_remains_silent_until_enable_has_started(self):
+        self.c.enable(True)
+        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        original_enable=self.c.enable
+        def observe_transition(ack):
+            state=self.c.state()
+            self.assertEqual(state['status'],'fault')
+            self.assertTrue(state['auto_resume'], 'Notifier must still see recovery pending')
+            return original_enable(ack)
+        with patch.object(self.c,'enable',side_effect=observe_transition):self.c.tick()
+        self.assertEqual(self.c.state()['status'],'active')
+
     def test_manual_stop_cancels_pending_resume(self):
         self.c.enable(True)
         self.c.disable('fault: Modbus read, register 148: ConnectionError')
