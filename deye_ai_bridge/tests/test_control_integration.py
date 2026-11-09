@@ -61,3 +61,27 @@ class ModelTests(unittest.TestCase):
         self.assertNotEqual(m['hours'][0]['action'],'grid_charge');self.assertIn('solar_charge',[r['action'] for r in m['hours'][1:3]])
 
 if __name__=='__main__':unittest.main()
+
+
+class ReadRetryTests(unittest.TestCase):
+    def run_read(self, failures):
+        once=Mock(side_effect=failures);sleep=Mock()
+        ns=dict(read_holding_once=once,time=SimpleNamespace(sleep=sleep))
+        f=next(x for x in TREE.body if isinstance(x,ast.FunctionDef) and x.name=='read_holding')
+        exec(compile(ast.Module(body=[f],type_ignores=[]),'retry','exec'),ns)
+        return ns['read_holding'],once,sleep
+
+    def network_error(self):
+        error=RuntimeError('Modbus read timeout');error.__cause__=TimeoutError('timeout');return error
+
+    def test_temporary_network_failure_retries_read(self):
+        read,once,sleep=self.run_read([self.network_error(),self.network_error(),[42]])
+        self.assertEqual(read(108,1),[42]);self.assertEqual(once.call_count,3)
+
+    def test_permanent_failure_is_bounded_and_protocol_is_not_retried(self):
+        read,once,_=self.run_read([self.network_error()]*3)
+        with self.assertRaises(RuntimeError):read(108,1)
+        self.assertEqual(once.call_count,3)
+        read,once,_=self.run_read([RuntimeError('Uventet Modbus-svar')])
+        with self.assertRaises(RuntimeError):read(108,1)
+        self.assertEqual(once.call_count,1)
