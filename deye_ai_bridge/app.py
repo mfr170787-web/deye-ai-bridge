@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.14"
+APP_VERSION = "0.8.15"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -204,7 +204,7 @@ def maybe_notify_control_fault():
         return
     status=state.get('status')
     # Recovery and its first attempts are silent. Alert only a terminal stop.
-    if status not in ('fault','restore_failed') or state.get('auto_resume'):
+    if status not in ('fault','restore_failed') or (state.get('auto_resume') and not state.get('recovery_exhausted')):
         return
     reason=state.get('stop_reason') or state.get('error') or ''
     if not str(reason).startswith(('fault:','worker_fault:')) and not state.get('error'):
@@ -222,6 +222,8 @@ def maybe_notify_control_fault():
         print('Control alert: vælg telefonmodtager under Tesla-planen.',flush=True);return
     result={'restored':'Automatikken kunne ikke genoptages automatisk. Oprindelige indstillinger er gendannet og efterkontrolleret. Kontrollér Bridge.',
             'manual':'Automatikken kunne ikke genoptages automatisk, og gendannelse er IKKE bekræftet. Kontrollér inverteren manuelt.'}[phase]
+    if state.get('recovery_exhausted'):
+        result='Tre genforsøg mislykkedes. Automatikken er på pause og prøver igen efter 15 minutter. Kontrollér Bridge og forbindelsen.'
     message=result+' Fejl: '+str(reason)[:1000]
     ha_request('/services/notify/'+service,'POST',{'title':'Deye AI · fejl i automatisk styring','message':message,
         'data':{'tag':'deye_ai_control_fault','url':'/hassio/ingress/'+addon_slug()}})
@@ -320,6 +322,17 @@ def modbus_operation(operation, start=None, count=None):
 
 
 def read_holding(start, count):
+    # Retry reads only. Each attempt obtains a fresh TCP connection and lock.
+    for attempt in range(3):
+        try:
+            return read_holding_once(start,count)
+        except RuntimeError as exc:
+            if not isinstance(exc.__cause__,(TimeoutError,ConnectionError,OSError)) or attempt==2:
+                raise
+            time.sleep(.3*(attempt+1))
+
+
+def read_holding_once(start, count):
     with modbus_operation("read", start, count):
         cfg = options()
         if count < 1 or count > 125 or start < 0 or start > 65535 or start + count > 65536:
@@ -362,7 +375,7 @@ def read_holding(start, count):
 def energy_plan():
     defaults = {
         "target_soc": 99, "minimum_soc_morning": 20, "morning_time": "07:00",
-        "evening_start": "16:00", "max_charge_w": 9000, "charge_profile": "150A-v1",
+        "evening_start": "16:00", "max_charge_w": 11000, "charge_profile": "190A-v1",
         "max_export_w": 0, "allow_battery_sale": False,
         "main_fuse_ampere": 35, "automatic_control": False,
         "battery_capacity_kwh": 32.0, "max_discharge_w": 4500,
@@ -375,14 +388,17 @@ def energy_plan():
     try:
         saved=json.loads(PLAN_FILE.read_text())
         defaults.update(saved)
-        if saved.get('charge_profile')!='150A-v1' and int(defaults['max_charge_w'])==4500:
-            defaults['max_charge_w']=9000
-        defaults['charge_profile']='150A-v1' 
+        # Keep any explicitly chosen lower power limit, including 8000 W.
+        if saved.get('charge_profile') not in ('150A-v1','190A-v1') and int(defaults['max_charge_w'])==4500:
+            defaults['max_charge_w']=11000
+        if saved.get('charge_profile')=='150A-v1' and int(defaults['max_charge_w']) in (8000,9000):
+            defaults['max_charge_w']=11000
+        defaults['charge_profile']='190A-v1'
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     defaults['target_soc'] = min(99, max(16, int(defaults['target_soc'])))
     defaults['minimum_soc_morning'] = max(15, min(98,int(defaults['minimum_soc_morning'])))
-    defaults['max_charge_w'] = max(0, min(9000,int(defaults['max_charge_w'])))
+    defaults['max_charge_w'] = max(0, min(11000,int(defaults['max_charge_w'])))
     defaults['max_discharge_w'] = max(0,min(4500,int(defaults['max_discharge_w'])))
     defaults['allow_battery_sale'] = False
     defaults['max_export_w'] = 0
@@ -395,7 +411,7 @@ def save_energy_plan(data):
     plan.update({k: v for k, v in data.items() if k in allowed})
     plan["target_soc"] = max(10, min(99, int(plan["target_soc"])))
     plan["minimum_soc_morning"] = max(15, min(98, int(plan["minimum_soc_morning"])))
-    plan["max_charge_w"] = max(0, min(9000, int(plan["max_charge_w"])))
+    plan["max_charge_w"] = max(0, min(11000, int(plan["max_charge_w"])))
     plan["max_export_w"] = max(0, min(12000, int(plan["max_export_w"])))
     plan["battery_capacity_kwh"] = max(5, min(100, float(plan["battery_capacity_kwh"])))
     plan["max_discharge_w"] = max(0, min(4500, int(plan["max_discharge_w"])))
@@ -1065,7 +1081,7 @@ PILOT_RESULTS = {'observed':'Manuelt observeret','not_observed':'Manuel afvigels
 PILOT_STEPS = [
     (1,'Udgangspunkt','Aflæs begge BMS: SOC, strøm, temperaturer og alarmer. Kontrollér friske invertermålinger. Inverterkredsen er sikret med 25 A.',False),
     (2,'Gennemgå planen','Kontrollér pris, solprognose, SOC-reserve og næste handling i planen. Gennemgangen udløser ingen kommando.',False),
-    (3,'Automatisk ladestart','Aktivér automatisk styring under opsyn; tilbagelæs kommando og bekræft faktisk ladning. Maks. 150 A samlet opladning.',False),
+    (3,'Automatisk ladestart','Aktivér automatisk styring under opsyn; tilbagelæs kommando og bekræft faktisk ladning. Maks. 190 A samlet opladning.',False),
     (4,'Stop under ladning','Deaktivér-knappen skal afslutte planstyringen og bekræfte de oprindelige indstillinger. Inverterens oprindelige drift kan derefter fortsætte.',False),
     (5,'Følg en planperiode','Handlingen skal følge planens tidspunkt, mål og begrundelse under opsyn.',False),
     (6,'Sol og dyre timer','Sammenhold soloverskud, batteriladning og husets batteriforbrug med de relevante planperioder. Observation alene beviser ikke automatisk styring.',False),
@@ -1120,7 +1136,7 @@ def pilot_view(sample, optimization):
     if not current:
         blockers.append('Der mangler en pris- og prognoseplan for det aktuelle tidspunkt.')
     return dict(mode='Driftsplan og observationer · aktivering styres i Automatisk styring',automatic_control=AUTO_CONTROL.state().get('status')=='active',
-                inverter_circuit_fuse_ampere=25, battery_charge_limit_a=150, created=now.isoformat(),plan_created=optimization.get('created'),sample_created=sample.get('created') if sample else None,
+                inverter_circuit_fuse_ampere=25, battery_charge_limit_a=190, created=now.isoformat(),plan_created=optimization.get('created'),sample_created=sample.get('created') if sample else None,
                 current=current,next=following,observed=observed,fresh=fresh,comparison=comparison,
                 blockers=blockers,steps=steps,records=records)
 
