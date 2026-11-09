@@ -54,3 +54,6 @@ Kør softwarekontroller med:
 ```sh
 python -m unittest discover -s deye_ai_bridge/tests -v
 ```
+
+### 0.8.12
+Telefonbesked om automatisk styring sendes kun ved endeligt stop, når automatisk genoptagelse ikke længere forsøges. Gendannelse, efterkontrol og automatiske genforsøg er tavse. Ved fortsat utilgængelig Modbus afventes forbindelsen uden gentagne beskeder. 150 A-ladegrænsen fra 0.8.11 bevares.
