@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.12"
+APP_VERSION = "0.8.13"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -42,7 +42,7 @@ from charge20_test import Charge20Test
 from modbus_telemetry import ClockDiagnostics
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
-from shadow_planning import price_window, limits, reserve, charge_schedule
+from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -744,39 +744,11 @@ def optimization_plan(sample, prices, weather):
     allowance = max(0, (soc-dynamic["reserve_soc"])*capacity/100*eta) if dynamic["forecast_complete"] else 0
     dynamic["tesla_available_kwh"] = round(allowance, 2)
     dynamic["actual_soc"] = initial_soc
-    rows = []
-    for i, slot in enumerate(slots):
-        req = reserve(slots[i:], plan)
-        fraction = slot["fraction"]
-        deficit = (slot["load"]-slot["pv"]*.7)*fraction
-        action, energy, reason = "hold", 0.0, "Bevar reserve; huset kan bruge nettet."
-        after = reserve(slots[i+1:], plan)
-        charge_target = min(plan['target_soc'],max(plan['minimum_soc_morning'],after['reserve_soc']))
-        discharge_floor = (plan['minimum_soc_morning'] if slot['price'] >= expensive else max(plan['minimum_soc_morning'], after['reserve_soc']))
-        if deficit < 0 and soc < plan["target_soc"]:
-            energy = -min(-deficit, plan["max_charge_w"]/1000*fraction,
-                          (plan["target_soc"]-soc)*capacity/100/eta)
-            action, reason = "solar_charge", "Forventet soloverskud efter husforbrug."
-        elif slot["price"] <= cheap and soc < plan["target_soc"]:
-            # Charge only for the upcoming house deficit before the next opportunity.
-            after = reserve(slots[i+1:], plan)
-            target = charge_target
-            energy = -min(plan["max_charge_w"]/1000*fraction, max(0, (target-soc)*capacity/100/eta))
-            if energy < -.01:
-                action, reason = "grid_charge", "Pris blandt de billigste; fyld op til beregnet husreserve."
-        elif slot["price"] > cheap and soc > plan["minimum_soc_morning"]:
-            energy = min(max(0, deficit), plan["max_discharge_w"]/1000*fraction,
-                         max(0, (soc-discharge_floor)*capacity/100*eta))
-            if energy > .01:
-                action, reason = "use_battery", ("Dyr time: brug batteriet til huset over minimumsreserven." if slot['price'] >= expensive else "Brug kun batterienergi ud over reserven til kommende dyre timer.")
-        soc += (-energy*eta if energy < 0 else -energy/eta)/capacity*100
-        soc = max(0, min(100, soc))
-        rows.append({"time": slot["time"].isoformat(), "price_dkk_kwh": round(slot["price"], 4),
-                     "pv_forecast_kwh": round(slot["pv"]*fraction, 2),
-                     "load_forecast_kwh": round(slot["load"]*fraction, 2),
-                     "action": action, "charge_target_soc": round(charge_target,1), "discharge_floor_soc": round(discharge_floor,1), "battery_power_w": round(energy/max(fraction,.001)*1000),
-                     "projected_soc": round(soc, 1), "reserve_soc": req["reserve_soc"], "reason": reason})
-    return {"status": "learning", "message": "Foreløbig husplan uden fremtidig Tesla-belastning; sol vægtet 70 %.",
+    rows = economic_dispatch(slots, power_limited_plan(plan, sample), initial_soc)
+    if rows:
+        dynamic['reserve_soc'] = rows[0]['reserve_soc']
+        dynamic['tesla_available_kwh'] = round(max(0, (initial_soc-dynamic['reserve_soc'])*capacity/100*eta),2) if dynamic['forecast_complete'] else 0
+    return {"status": "learning", "message": "Samlet prisplan for kendte timer; sol vægtet 70 %, husforbrug med sikkerhedsmargin.",
             "created": now.isoformat(), "hours_available": len(rows), "learning_samples": count,
             "cheap_limit": cheap, "expensive_limit": expensive, "battery_capacity_kwh": capacity,
             "reserve_soc": dynamic["reserve_soc"], "target_soc": plan["target_soc"],
