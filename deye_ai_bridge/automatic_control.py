@@ -21,6 +21,27 @@ def stamp(value):
     return d
 
 
+def charge_window_request(ctx,row,soc,voltage):
+    """Average current needed to finish the current contiguous charging window."""
+    if row.get('action')!='grid_charge':return None,None
+    rows=ctx['optimization']['hours']
+    start=next((i for i,r in enumerate(rows) if r['time']==row['time']),None)
+    if start is None or 'battery_power_w' not in row:return None,None
+    window=[row]
+    for candidate in rows[start+1:]:
+        if candidate.get('action')!='grid_charge' or stamp(candidate['time'])-stamp(window[-1]['time'])!=timedelta(hours=1):break
+        window.append(candidate)
+    end=stamp(window[-1]['time'])+timedelta(hours=1)
+    hours=max(1/60,(end-datetime.now(timezone.utc)).total_seconds()/3600)
+    target=max(float(r.get('charge_target_soc',r['projected_soc'])) for r in window)
+    capacity=float(ctx['plan'].get('battery_capacity_kwh',32))
+    eta=(float(ctx['plan'].get('roundtrip_efficiency_percent',90))/100)**.5
+    watts=max(0,target-soc)*capacity/100/eta/hours*1000
+    # Ten percent timing margin; round up to 5 A, bounded later by all limits.
+    amps=5*math.ceil(watts*1.1/voltage/5)
+    return max(5,amps),target
+
+
 def valid_write(address, values):
     if type(values) is not list or not values:
         return False
@@ -161,8 +182,8 @@ class AutomaticControl:
         power=raw_w-65536 if raw_w>32767 else raw_w
         if not 4000<=voltage<=6000 or not 0<=soc<=100:
             raise ValueError('Ugyldig batterispænding/SOC.')
-        if power < -9500 or -power/(voltage/100 if voltage else 1)>165:
-            raise ValueError('Opladning over softwaregrænsen 9500 W eller 165 A.')
+        if power < -12000 or -power/(voltage/100 if voltage else 1)>210:
+            raise ValueError('Opladning over softwaregrænsen 12000 W eller 210 A.')
         delta=self.clock(strict)
         floor=max(15,int(plan['minimum_soc_morning']),context[115]+1,context[117])
         maximum=int(plan['target_soc'])
@@ -249,6 +270,7 @@ class AutomaticControl:
                 self.command(s,148,TIMES)
                 s['status']='active';self.save(s)
                 self.apply(s,ctx,row,c,m,floor,maximum)
+                s['resume_attempts']=[];s['recovery_exhausted']=False;self.save(s)
             except Exception as exc:
                 self.disable('fault: '+str(exc))
                 raise
@@ -257,12 +279,19 @@ class AutomaticControl:
     def apply(self,s,ctx,row,c,m,floor,maximum):
         if s['endpoint']!=list(self.endpoint()):raise ValueError('Inverterforbindelsen er ændret.')
         plan=ctx['plan'];soc=m['soc'];voltage=m['voltage_v'];action=row['action']
-        charge=min(150,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
+        charge=min(190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
+        if charge>100:charge=5*(charge//5)
+        requested,window_target=charge_window_request(ctx,row,soc,voltage)
+        if requested is not None:charge=min(charge,requested)
+        previous=(s.get('command') or {}).get('charge_a')
+        if previous is not None and abs(previous-charge)<=3:
+            charge=min(previous,190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
         discharge=min(90,c[213],max(0,int(float(plan['max_discharge_w'])/voltage)))
         if soc>=maximum:s['charge_paused']=True
         elif soc<=maximum-2:s['charge_paused']=False
         if s.get('charge_paused'):charge=0
         target=max(floor,min(maximum,int(math.ceil(row.get('charge_target_soc',row['projected_soc'])))))
+        if window_target is not None:target=max(floor,min(maximum,int(math.ceil(window_target))))
         discharge_floor=max(floor,min(100,int(math.ceil(row.get('discharge_floor_soc',floor)))))
         reserve_for_car=False
         if ctx.get('tesla_power_kw') is None or ctx.get('tesla_power_kw',0)>0:
@@ -281,11 +310,16 @@ class AutomaticControl:
         if any(current[str(a)] != TIMES[a-148] for a in range(148,154)):
             raise ValueError('TOU-tiderne er ændret under styringen.')
         if target_values!=s['expected']:
-            # Disable old grid demand before changing targets or current limits.
-            self.command(s,172,[0]*6)
-            self.command(s,166,[target if grid else discharge_floor]*6)
-            self.command(s,108,[charge,discharge]);self.command(s,128,[charge if grid else 0])
-            if grid:self.command(s,172,[1]*6)
+            mode_changed=any(target_values[str(a)]!=s['expected'][str(a)] for a in range(166,178))
+            # Current-only adjustment does not interrupt an unchanged charging mode.
+            if mode_changed:
+                self.command(s,172,[0]*6)
+                self.command(s,166,[target if grid else discharge_floor]*6)
+            if [charge,discharge]!=[s['expected']['108'],s['expected']['109']]:
+                self.command(s,108,[charge,discharge])
+            if target_values['128']!=s['expected']['128']:
+                self.command(s,128,[charge if grid else 0])
+            if mode_changed and grid:self.command(s,172,[1]*6)
         desired=dict(action=effective,requested_action=action,time=row['time'],reason=row['reason']+(' Husreserven beskyttes mens Tesla lader eller bildata er ukendte.' if reserve_for_car else ''),
                      charge_a=charge,discharge_a=discharge,grid_charge=grid,soc_target=target if grid else discharge_floor,
                      maximum_soc=maximum,reserve_soc=discharge_floor)
@@ -422,7 +456,12 @@ class AutomaticControl:
                     previous=current;time.sleep(.5)
                 attempts=[t for t in s.get('restore_retry_attempts',[]) if time.time()-t<3600]
                 if len(attempts)>=3:
-                    s['auto_resume']=False;self.log(s,'restore_retry_blocked',reason='Tre gendannelsesforsøg inden for en time.');self.save(s);return
+                    if s.get('restore_resume_after',0)>time.time():return
+                    if s.get('restore_resume_after'):
+                        attempts=[];s.pop('restore_resume_after',None)
+                    else:
+                        s['restore_resume_after']=time.time()+900;s['recovery_exhausted']=True
+                        self.log(s,'restore_retry_cooldown',reason='Tre gendannelsesforsøg; pause 15 minutter.');self.save(s);return
                 attempts.append(time.time());s['restore_retry_attempts']=attempts
                 self.log(s,'communication_restored_retry');self.save(s)
                 self.disable(s['stop_reason'])
@@ -438,8 +477,25 @@ class AutomaticControl:
             s=self.state()
             if not s.get('auto_resume') or not s.get('restored') or s.get('status')!='fault':return
             attempts=[t for t in s.get('resume_attempts',[]) if time.time()-t<3600]
+            if s.get('resume_after',0)>time.time():return
+            if s.get('resume_after'):
+                try:
+                    if s['endpoint']!=list(self.endpoint()) or self.owned()!=s['baseline']:raise ValueError('Gendannede registre afviger.')
+                    self.guards(self.context(),True)
+                    since=s.setdefault('recovery_stable_since',time.time())
+                    s['recovery_stable_checks']=s.get('recovery_stable_checks',0)+1
+                    self.save(s)
+                    if time.time()-since<30 or s['recovery_stable_checks']<3:return
+                    s.pop('resume_after',None);s.pop('recovery_stable_since',None);s.pop('recovery_stable_checks',None)
+                    s['resume_attempts']=[];attempts=[];self.save(s)
+                except Exception as exc:
+                    s.pop('recovery_stable_since',None);s['recovery_stable_checks']=0;self.save(s)
+                    if not self.communication_read_error(str(exc)):
+                        s['auto_resume']=False;s['error']=str(exc);self.save(s)
+                    return
             if len(attempts)>=3:
-                s['auto_resume']=False;self.log(s,'auto_resume_blocked',reason='Tre forsøg inden for en time.');self.save(s);return
+                s['resume_after']=time.time()+900;s['recovery_exhausted']=True
+                self.log(s,'auto_resume_cooldown',reason='Tre mislykkede genforsøg; ny kontrol efter 15 minutter.');self.save(s);return
             attempts.append(time.time());s.update(resume_attempts=attempts,resume_last_attempt=time.time());self.save(s)
             try:
                 if s['endpoint']!=list(self.endpoint()):raise ValueError('Forbindelsen er ændret.')
