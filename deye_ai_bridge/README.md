@@ -8,7 +8,7 @@ Lokal pris- og solbaseret styring af husbatteriet via Home Assistant og EW11.
 - Planen prioriterer soloverskud, billige netpriser og batteriforbrug i dyre timer. Mellemdyre timer må kun bruge energi over den beregnede fremtidige husreserve.
 - **Deaktivér og gendan** stopper planstyringen og skriver de oprindelige strømgrænser samt alle gemte TOU-tider, SOC-mål og ladeflag tilbage. Inverterens oprindelige drift kan derefter fortsætte; knappen slukker ikke inverteren.
 - Alle seks TOU-perioder anvender den aktuelle handling. Tidsgrænserne er faste 00/04/08/12/16/20 under styring; den løbende plan bestemmer handlingen, også over midnat.
-- Maksimalt 150 A samlet batteriladning; afladning fortsat højst 90 A; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 9000 W opladning og 4500 W afladning. Den tidligere standard på 4500 W opladning hæves én gang til 9000 W i 0.8.11; brugerdefinerede lavere grænser bevares. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
+- Maksimalt 190 A samlet batteriladning med tilpasning til ladevinduet; afladning fortsat højst 90 A; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 9000 W opladning og 4500 W afladning. Den tidligere standard på 4500 W opladning hæves én gang til 9000 W i 0.8.11; brugerdefinerede lavere grænser bevares. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
 - Reservehold stopper afladning; soloverskud kan fortsat oplade. Netladning bruger periodens beregnede SOC-mål. Ved mål-SOC begrænses ladning med hysterese.
 - Der ændres ikke på BMS-grænser, Remote-mode, eksporttilstand, batterispændinger eller sikkerhedsindstillinger. Zero Export, Solar Sell fra og SOC/TOU skal allerede være korrekt indstillet.
 - Når Tesla lader, eller dens effekt er ukendt, beskyttes den beregnede husreserve også mod batteriforbrug til bilen. Tesla startes og stoppes ikke af denne version.
@@ -63,3 +63,11 @@ Husplanen beregner nu samlet importpris på tværs af alle sammenhængende kendt
 
 ### 0.8.14
 Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet, mens aktivering endnu læste og kontrollerede inverteren. Fejlbeskeder kunne derfor blive sendt ved vellykket genstart. Genoptagelse forbliver nu markeret som igangværende indtil aktiveringen er journalført. Beskedhistorikken medtages i analysepakken for at kunne kontrollere faktisk afsendelse.
+
+### 0.8.15
+- Modbus-læsninger får op til tre forsøg med kort stigende pause og ny TCP-forbindelse. Protokolfejl og skrivekald gentages ikke af denne læsefunktion.
+- Vellykkede genoptagelser nulstiller genforsøgstælleren. Tre mislykkede genoptagelser medfører 15 minutters pause, derefter mindst tre gyldige kontroller over 30 sekunder før ny aktivering. Manuelt stop, procesgenstart og fremmede registerværdier giver ikke automatisk genaktivering. Mislykket gendannelse kan forsøges igen i adskilte forløb efter 15 minutter; fremmede værdier blokerer stadig.
+- Telefonen adviseres først ved opgivet genforsøgsforløb eller fejl, der kræver indgriben; pausebeskeden angiver at automatisk kontrol prøves igen.
+- Loft for samlet ladning er 190 A; afladning forbliver højst 90 A. Lavere modtaget BMS-grænse respekteres. Ingen fordobling af den ene BMS-værdi og ingen automatisk forhøjelse til 240 A.
+- Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
+- Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
