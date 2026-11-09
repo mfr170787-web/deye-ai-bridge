@@ -57,3 +57,6 @@ python -m unittest discover -s deye_ai_bridge/tests -v
 
 ### 0.8.12
 Telefonbesked om automatisk styring sendes kun ved endeligt stop, når automatisk genoptagelse ikke længere forsøges. Gendannelse, efterkontrol og automatiske genforsøg er tavse. Ved fortsat utilgængelig Modbus afventes forbindelsen uden gentagne beskeder. 150 A-ladegrænsen fra 0.8.11 bevares.
+
+### 0.8.13
+Husplanen beregner nu samlet importpris på tværs af alle sammenhængende kendte pristimer (op til 48 timer), inklusive ladetab, SOC- og effektgrænser. Billig nat kan dække både morgen og dyr aften i stedet for en dyrere middagsladning. Sol krediteres fortsat 70 %, husforbruget tillægges den valgte procentvise sikkerhedsmargin. Energi fordeles i trin på 0,25 kWh; dette er en prognosebaseret beregning, ikke en garanti for faktisk forbrug. Ukendte prisperioder anvendes ikke som ladevinduer. Modellen begrænses også af de aktuelle BMS-strømgrænser og 150 A ladning / 90 A afladning. Scanner, logger, gendannelse og tavse automatiske genforsøg bevares.
