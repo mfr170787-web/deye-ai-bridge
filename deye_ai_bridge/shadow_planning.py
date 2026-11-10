@@ -214,11 +214,11 @@ def power_limited_plan(plan, sample):
         raw=json.loads(sample.get('telemetry_json') or '{}').get('raw_registers',{})
         voltage=float(raw.get('587',5000))/100
         if not 40<=voltage<=60:voltage=50.
-        charge=float(raw.get('212',190));discharge=float(raw.get('213',90))
+        charge=float(raw.get('212',190));discharge=float(raw.get('213',190))
         if not 0<=charge<=500:charge=0
         if not 0<=discharge<=500:discharge=0
     except (ValueError,TypeError,AttributeError):
-        voltage,charge,discharge=50.,190.,90.
+        voltage,charge,discharge=50.,190.,190.
     limited['max_charge_w']=min(float(plan['max_charge_w']),min(190,charge)*voltage)
-    limited['max_discharge_w']=min(float(plan['max_discharge_w']),min(90,discharge)*voltage)
+    limited['max_discharge_w']=min(float(plan['max_discharge_w']),min(190,discharge)*voltage)
     return limited
