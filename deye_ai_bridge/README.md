@@ -72,5 +72,10 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
 
+### 0.8.17
+
+- Planlagt batteridrift afrunder den beregnede SOC-reserve ned til inverterens hele procent. Tolerancen er under ét procentpoint; den hårde minimumsreserve underskrides ikke. Reservehold og Tesla-reserven afrundes fortsat op.
+- Timeplanen viser den bekræftede handlings indstilling og aktive reserve, så et reservehold ikke fremstår som bekræftet batteridrift.
+
 ### 0.8.16
 Tilføjer knappen “Tesla – lad uden husbatteri” under Automatisk styring. Kræver aktiv, godkendt automatik. Funktionen sætter afladningsgrænsen og husbatteriets netladning til nul; solopladning kan fortsætte. Den starter eller stopper ikke Teslaen. Normal energiplan genoptages ved knappen “Tilbage til normal plan”, efter bekræftet stop/frakobling over 60 sekunder, efter 30 minutter uden tilsluttet bil eller senest efter 12 timer. Ukendte bildata ophæver ikke straks beskyttelsen. Tilstanden bevares ved automatisk kommunikationsgenoptagelse, men annulleres ved manuelt stop og procesgenstart. Ved forbindelsesudfald/fejl kan gendannelse af de oprindelige indstillinger tillade afladning igen; funktionen er ingen uafhængig hardwarebeskyttelse.
