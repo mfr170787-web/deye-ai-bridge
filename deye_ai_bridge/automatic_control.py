@@ -262,6 +262,7 @@ class AutomaticControl:
                     raise ValueError('Oprindelige indstillinger ligger uden for understøttet gendannelse.')
             s=dict(status='enabling',restored=False,started=datetime.now(timezone.utc).isoformat(),endpoint=list(self.endpoint()),
                    baseline=baseline,expected=dict(baseline),pending=None,events=old.get('events',[]),observations=[],error=None,resume_attempts=old.get('resume_attempts',[]))
+            s.update({k:v for k,v in old.items() if k.startswith('tesla_only_')})
             self.log(s,'enabled',baseline=baseline);self.save(s)
             try:
                 # No charge/discharge demand while reshaping the TOU schedule.
@@ -276,8 +277,50 @@ class AutomaticControl:
                 raise
             return self.report()
 
+    def tesla_grid_mode(self,enabled):
+        if type(enabled) is not bool:raise ValueError('Vælg til eller fra.')
+        ctx=self.context()
+        with self.lock:
+            s=self.state()
+            if s.get('status')!='active':raise ValueError('Aktivér automatisk styring først.')
+            row,c,m,floor,maximum=self.guards(ctx)
+            for key in list(s):
+                if key.startswith('tesla_only_'):s.pop(key)
+            s.update(tesla_only_active=enabled,effect_action=None)
+            if enabled:
+                s.update(tesla_only_started=time.time(),tesla_only_until=time.time()+12*3600,
+                         tesla_only_seen_connected=ctx['sample'].get('tesla_connected')==1,
+                         tesla_only_seen_charging=False)
+            self.log(s,'tesla_grid_mode',enabled=enabled);self.save(s)
+            try:self.apply(s,ctx,row,c,m,floor,maximum)
+            except Exception as exc:
+                self.disable('fault: '+str(exc));raise
+            return self.report()
+
+    def tesla_override(self,s,ctx,row):
+        if not s.get('tesla_only_active'):return row
+        sample=ctx['sample'];now=time.time()
+        connected=sample.get('tesla_connected')
+        power=ctx.get('tesla_power_kw')
+        if connected==1:s['tesla_only_seen_connected']=True
+        if isinstance(power,(int,float)) and power>.2:s['tesla_only_seen_charging']=True
+        state=str(sample.get('tesla_charging_state') or '').lower()
+        ended=(connected==0 and s.get('tesla_only_seen_connected')) or (s.get('tesla_only_seen_charging') and isinstance(power,(int,float)) and power<=.2 and state in ('complete','stopped','disconnected'))
+        if ended:s.setdefault('tesla_only_stop_since',now)
+        else:s.pop('tesla_only_stop_since',None)
+        reason=None
+        if now>=s.get('tesla_only_until',0):reason='Maksimal varighed på 12 timer nået.'
+        elif connected==0 and not s.get('tesla_only_seen_connected') and now-s.get('tesla_only_started',now)>=1800:reason='Ingen bil tilsluttet inden for 30 minutter.'
+        elif ended and now-s.get('tesla_only_stop_since',now)>=60:reason='Tesla er stoppet eller frakoblet.'
+        if reason:
+            s['tesla_only_active']=False;s['effect_action']=None
+            self.log(s,'tesla_grid_mode_finished',reason=reason)
+            return row
+        return {**row,'action':'hold','reason':'Tesla – lad uden husbatteri: afladning og netopladning af husbatteriet er midlertidigt blokeret.'}
+
     def apply(self,s,ctx,row,c,m,floor,maximum):
         if s['endpoint']!=list(self.endpoint()):raise ValueError('Inverterforbindelsen er ændret.')
+        row=self.tesla_override(s,ctx,row)
         plan=ctx['plan'];soc=m['soc'];voltage=m['voltage_v'];action=row['action']
         charge=min(190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
         if charge>100:charge=5*(charge//5)
@@ -351,10 +394,11 @@ class AutomaticControl:
             self.generation+=1
             s=self.state()
             if reason=='manual_disable':
-                s['auto_resume']=False;self.save(s)
+                s['auto_resume']=False;s['tesla_only_active']=False;self.save(s)
             if s.get('status') in ('disabled','fault') and s.get('restored',True):return self.report()
             if s.get('status')=='verifying_restore':return self.report()
             s['auto_resume']=(reason.startswith('fault: Modbus read,') and any(t in reason for t in ('TimeoutError','ConnectionError')))
+            if not s['auto_resume']:s['tesla_only_active']=False
             s.update(status='restoring',error=reason if reason!='manual_disable' else None,stop_reason=reason)
             self.log(s,'disable_requested',reason=reason);self.save(s)
             try:
