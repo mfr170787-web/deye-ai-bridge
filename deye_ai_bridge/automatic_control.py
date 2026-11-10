@@ -335,7 +335,13 @@ class AutomaticControl:
         if s.get('charge_paused'):charge=0
         target=max(floor,min(maximum,int(math.ceil(row.get('charge_target_soc',row['projected_soc'])))))
         if window_target is not None:target=max(floor,min(maximum,int(math.ceil(window_target))))
-        discharge_floor=max(floor,min(100,int(math.ceil(row.get('discharge_floor_soc',floor)))))
+        # TOU accepts whole percentages. Rounding a planned discharge endpoint up
+        # can equal the measured SOC and prevent every remaining fraction of the hour.
+        # Allow less than one percentage point of dispatch tolerance, never below
+        # the hard minimum; hold and Tesla protection remain conservative.
+        planned_floor=float(row.get('discharge_floor_soc',floor))
+        rounded_floor=math.floor(planned_floor) if action=='use_battery' else math.ceil(planned_floor)
+        discharge_floor=max(math.ceil(floor),min(100,int(rounded_floor)))
         reserve_for_car=False
         if ctx.get('tesla_power_kw') is None or ctx.get('tesla_power_kw',0)>0:
             house_reserve=int(math.ceil(ctx['optimization'].get('dynamic_reserve',{}).get('reserve_soc',floor)))
@@ -363,6 +369,8 @@ class AutomaticControl:
             if target_values['128']!=s['expected']['128']:
                 self.command(s,128,[charge if grid else 0])
             if mode_changed and grid:self.command(s,172,[1]*6)
+        if action=='use_battery' and not allow_discharge:
+            row={**row,'reason':f"Reservehold: SOC {soc:g} % er ved eller under den aktive reserve {discharge_floor} %. "+row['reason']}
         desired=dict(action=effective,requested_action=action,time=row['time'],reason=row['reason']+(' Husreserven beskyttes mens Tesla lader eller bildata er ukendte.' if reserve_for_car else ''),
                      charge_a=charge,discharge_a=discharge,grid_charge=grid,soc_target=target if grid else discharge_floor,
                      maximum_soc=maximum,reserve_soc=discharge_floor)
