@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.18"
+APP_VERSION = "0.8.19"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -42,6 +42,7 @@ from charge20_test import Charge20Test
 from modbus_telemetry import ClockDiagnostics
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
+from monthly_register import MonthlyRegister
 from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan
 
 TESLA_ENTITIES = {
@@ -1023,6 +1024,10 @@ def collect_sample():
         if should_add:
             conn.execute("INSERT INTO decisions(created,action,title,explanation,details_json) VALUES(?,?,?,?,?)",
                          (sample["created"], action, title, explanation, json.dumps(details, ensure_ascii=False)))
+    try:
+        MONTHLY_REGISTER.ingest(sample,prices)
+    except Exception as exc:
+        print("Monthly register failed: %s"%exc,flush=True)
     maybe_send_tesla_reminder(sample, prices)
     publish_home_operation(sample, prices, weather)
     return sample
@@ -1432,6 +1437,8 @@ def write_automatic_values(address, values):
             raise RuntimeError('Automatisk Modbus-skrivning ikke bekræftet')
 
 
+MONTHLY_REGISTER = MonthlyRegister(DATA_DIR / 'monthly_register.db')
+
 CLOCK_DIAGNOSTICS = ClockDiagnostics(DATA_DIR / 'clock_diagnostics.db', read_holding)
 CHARGE_TEST = ChargeTest(DATA_DIR / 'charge_test.json', read_holding, write_test_register, options)
 CHARGE_TEST.write_tou = write_test_tou
@@ -1460,6 +1467,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/monthly-register'):
+                return self.send_json({'months':MONTHLY_REGISTER.months()})
+            if path.endswith('/api/monthly-register/excel'):
+                params=urllib.parse.parse_qs(urlparse(self.path).query)
+                month=params.get('month',[''])[0]
+                payload=MONTHLY_REGISTER.download(month)
+                self.send_response(200)
+                self.send_header('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                self.send_header('Content-Disposition',f'attachment; filename=elregnskab-{month}.xlsx')
+                self.send_header('Content-Length',str(len(payload)))
+                self.send_header('Cache-Control','no-store')
+                self.end_headers();self.wfile.write(payload);return
             if path.endswith('/api/automation'):
                 return self.send_json(AUTO_CONTROL.report())
             if path.endswith('/api/legacy-tests'):
@@ -1606,6 +1625,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    with db() as conn:
+        MONTHLY_REGISTER.backfill(dict(r) for r in conn.execute('SELECT created,telemetry_json,price_dkk FROM samples ORDER BY id'))
+    MONTHLY_REGISTER.finalize()
     threading.Thread(target=CLOCK_DIAGNOSTICS.worker, daemon=True).start()
     threading.Thread(target=TEST_SUITE.worker, args=(TWENTY_TEST,), daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
