@@ -174,7 +174,18 @@ class ControllerTests(unittest.TestCase):
         self.r[212]=120;self.c.tick()
         self.assertEqual((self.r[108],self.r[128]),(120,120))
         self.action='use_battery';self.c.tick()
-        self.assertLessEqual(self.r[109],90)
+        self.assertLessEqual(self.r[109],190)
+
+    def test_discharge_190a_respects_bms_power_reserve_and_tesla(self):
+        self.plan['max_discharge_w']=11000;self.action='use_battery'
+        self.c.enable(True);self.assertEqual(self.r[109],190)
+        self.r[213]=120;self.c.tick();self.assertEqual(self.r[109],120)
+        self.plan['max_discharge_w']=4500;self.c.tick();self.assertEqual(self.r[109],86)
+        self.plan['max_discharge_w']=11000;self.r[588]=20;self.c.tick()
+        self.assertEqual(self.r[109],0)
+        self.r[588]=30;self.c.tick();self.c.tesla_grid_mode(True)
+        self.assertEqual(self.r[109],0)
+        self.c.tesla_grid_mode(False);self.assertEqual(self.r[109],120)
 
     def test_charge_window_uses_lower_current_when_time_allows(self):
         ctx=self.context();row=ctx['optimization']['hours'][0]
