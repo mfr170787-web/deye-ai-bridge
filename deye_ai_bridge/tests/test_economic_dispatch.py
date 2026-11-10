@@ -58,4 +58,6 @@ class EconomicDispatchTests(unittest.TestCase):
         sample={'telemetry_json':json.dumps({'raw_registers':{'587':5200,'212':120,'213':190}})}
         plan=power_limited_plan({**self.plan,'max_charge_w':9000,'max_discharge_w':9000},sample)
         self.assertEqual(plan['max_charge_w'],6240)
-        self.assertEqual(plan['max_discharge_w'],4680)
+        self.assertEqual(plan['max_discharge_w'],9000)
+        sample['telemetry_json']=json.dumps({'raw_registers':{'587':5200,'212':190,'213':80}})
+        self.assertEqual(power_limited_plan(plan,sample)['max_discharge_w'],4160)
