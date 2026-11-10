@@ -72,6 +72,14 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
 
+### 0.8.19
+
+- Varigt elregister i `/data/monthly_register.db`, separat fra rå målehistorik. Gemmer kumulativ netkøbstæller, samlede timepriser og fremover Andel-/netprisdele. Ingen automatisk sletning.
+- Elregnskab-kortet tilbyder månedligt Excel-download med timeforbrug, priser, formler, datadækning og fakturasammenligning. Abonnementer og gebyrer indtastes i Excel; moms er allerede med i timepriserne.
+- Ved første start importeres eksisterende Bridge-historik. Timer uden data og historiske priser uden prisdele markeres. Tællerdifferencer fordeles tidsmæssigt over timegrænser; huller over 180 sekunder og nulstillinger udelades. Deye er ikke afregningsmåleren. Gemte tariffer og aftaletillæg er ikke verificeret alene af denne funktion.
+- Afsluttede måneder arkiveres automatisk efter ét døgn ved efterfølgende dataindsamling/start. Excel og datagrundlag gemmes i `/data/monthly_reports/` og overskrives ikke. Medtag tilføjelsens data i HA-backup. Den igangværende måned er foreløbig.
+- Ingen ændring af inverterstyringen. Genstart kræver fortsat manuel genaktivering efter gendannelse.
+
 ### 0.8.18
 
 - Afladning hævet til højst 190 A samlet, begrænset af BMS, valgt effekt og SOC-reserve. Planlægning bruger samme loft. Tesla-beskyttelse blokerer fortsat afladning.
