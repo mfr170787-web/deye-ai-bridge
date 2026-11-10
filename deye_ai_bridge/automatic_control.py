@@ -329,7 +329,7 @@ class AutomaticControl:
         previous=(s.get('command') or {}).get('charge_a')
         if previous is not None and abs(previous-charge)<=3:
             charge=min(previous,190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
-        discharge=min(90,c[213],max(0,int(float(plan['max_discharge_w'])/voltage)))
+        discharge=min(190,c[213],max(0,int(float(plan['max_discharge_w'])/voltage)))
         if soc>=maximum:s['charge_paused']=True
         elif soc<=maximum-2:s['charge_paused']=False
         if s.get('charge_paused'):charge=0
