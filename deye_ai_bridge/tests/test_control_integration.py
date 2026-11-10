@@ -19,7 +19,7 @@ TREE=ast.parse(SOURCE)
 class DispatchTests(unittest.TestCase):
     def setUp(self):
         h=next(x for x in TREE.body if isinstance(x,ast.ClassDef) and x.name=='Handler')
-        self.auto=SimpleNamespace(enable=Mock(return_value={'status':'active'}),disable=Mock(return_value={'status':'verifying_restore'}))
+        self.auto=SimpleNamespace(enable=Mock(return_value={'status':'active'}),disable=Mock(return_value={'status':'verifying_restore'}),tesla_grid_mode=Mock(return_value={'status':'active'}))
         ns=dict(BaseHTTPRequestHandler=BaseHTTPRequestHandler,json=json,urlparse=urlparse,AUTO_CONTROL=self.auto)
         exec(compile(ast.Module(body=[h],type_ignores=[]),'handler','exec'),ns);self.cls=ns['Handler']
     def post(self,body,header=True,path='/api/automation'):
@@ -30,6 +30,12 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.post({'action':'enable'},False)[1],403);self.auto.enable.assert_not_called()
         self.post({'action':'enable','cloud_off':True});self.auto.enable.assert_called_once_with(True)
         self.post({'action':'disable'});self.auto.disable.assert_called_once_with()
+    def test_tesla_mode_button_routes_and_header(self):
+        self.assertEqual(self.post({'action':'tesla_grid_on'},False)[1],403)
+        self.auto.tesla_grid_mode.assert_not_called()
+        self.post({'action':'tesla_grid_on'});self.auto.tesla_grid_mode.assert_called_with(True)
+        self.post({'action':'tesla_grid_off'});self.auto.tesla_grid_mode.assert_called_with(False)
+
     def test_retired_start_and_unknown_action(self):
         for path in ('/api/charge20','/api/test-suite','/api/charge-test'):
             self.assertEqual(self.post({'action':'start'},path=path)[1],400)
