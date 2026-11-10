@@ -265,6 +265,35 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],0)
         self.c.disable();self.assertFalse(self.c.state()['tesla_only_active'])
 
+    def test_fractional_dispatch_reserve_does_not_block_integer_soc(self):
+        original=self.context
+        def context():
+            ctx=original();ctx['tesla_power_kw']=0
+            ctx['optimization']['hours'][0].update(discharge_floor_soc=66.4,projected_soc=66.4)
+            return ctx
+        self.c.context=context;self.action='use_battery';self.r[588]=67
+        self.c.enable(True)
+        self.assertGreater(self.r[109],0);self.assertEqual(self.r[166],66)
+        self.assertEqual(self.c.state()['command']['action'],'use_battery')
+        self.r[588]=66;self.c.tick()
+        self.assertEqual(self.r[109],0)
+        self.assertEqual(self.c.state()['command']['action'],'hold')
+        self.assertIn('Reservehold',self.c.state()['command']['reason'])
+        # A higher hard minimum must never be rounded down.
+        self.plan['minimum_soc_morning']=67;self.r[588]=67;self.c.tick()
+        self.assertEqual(self.r[109],0);self.assertEqual(self.r[166],67)
+
+    def test_tesla_reserve_is_still_rounded_up(self):
+        original=self.context
+        def context():
+            ctx=original();ctx['tesla_power_kw']=11
+            ctx['optimization']['dynamic_reserve']={'reserve_soc':66.4}
+            ctx['optimization']['hours'][0]['discharge_floor_soc']=66.4
+            return ctx
+        self.c.context=context;self.action='use_battery';self.r[588]=67
+        self.c.enable(True)
+        self.assertEqual(self.r[166],67);self.assertEqual(self.r[109],0)
+
     def test_charge_current_software_trip(self):
         self.plan['max_charge_w']=11000;self.c.enable(True)
         self.r[590]=65536-11500
