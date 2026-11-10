@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.17"
+APP_VERSION = "0.8.18"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -378,7 +378,7 @@ def energy_plan():
         "evening_start": "16:00", "max_charge_w": 11000, "charge_profile": "190A-v1",
         "max_export_w": 0, "allow_battery_sale": False,
         "main_fuse_ampere": 35, "automatic_control": False,
-        "battery_capacity_kwh": 32.0, "max_discharge_w": 4500,
+        "battery_capacity_kwh": 32.0, "max_discharge_w": 11000, "discharge_profile": "190A-v1",
         "roundtrip_efficiency_percent": 90,
         "tesla_target_soc": 80, "tesla_departure_time": "07:00",
         "tesla_arrival_time": "16:00", "tesla_battery_capacity_kwh": 75.0,
@@ -394,12 +394,15 @@ def energy_plan():
         if saved.get('charge_profile')=='150A-v1' and int(defaults['max_charge_w']) in (8000,9000):
             defaults['max_charge_w']=11000
         defaults['charge_profile']='190A-v1'
+        if saved.get('discharge_profile')!='190A-v1' and int(defaults['max_discharge_w'])==4500:
+            defaults['max_discharge_w']=11000
+        defaults['discharge_profile']='190A-v1'
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     defaults['target_soc'] = min(99, max(16, int(defaults['target_soc'])))
     defaults['minimum_soc_morning'] = max(15, min(98,int(defaults['minimum_soc_morning'])))
     defaults['max_charge_w'] = max(0, min(11000,int(defaults['max_charge_w'])))
-    defaults['max_discharge_w'] = max(0,min(4500,int(defaults['max_discharge_w'])))
+    defaults['max_discharge_w'] = max(0,min(11000,int(defaults['max_discharge_w'])))
     defaults['allow_battery_sale'] = False
     defaults['max_export_w'] = 0
     return defaults
@@ -414,7 +417,7 @@ def save_energy_plan(data):
     plan["max_charge_w"] = max(0, min(11000, int(plan["max_charge_w"])))
     plan["max_export_w"] = max(0, min(12000, int(plan["max_export_w"])))
     plan["battery_capacity_kwh"] = max(5, min(100, float(plan["battery_capacity_kwh"])))
-    plan["max_discharge_w"] = max(0, min(4500, int(plan["max_discharge_w"])))
+    plan["max_discharge_w"] = max(0, min(11000, int(plan["max_discharge_w"])))
     plan["roundtrip_efficiency_percent"] = max(70, min(100, int(plan["roundtrip_efficiency_percent"])))
     plan["tesla_target_soc"] = max(50, min(80, int(plan["tesla_target_soc"])))
     for key, fallback in (("tesla_departure_time", "07:00"), ("tesla_arrival_time", "16:00")):
