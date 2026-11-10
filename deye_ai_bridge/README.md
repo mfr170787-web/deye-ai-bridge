@@ -8,7 +8,7 @@ Lokal pris- og solbaseret styring af husbatteriet via Home Assistant og EW11.
 - Planen prioriterer soloverskud, billige netpriser og batteriforbrug i dyre timer. Mellemdyre timer må kun bruge energi over den beregnede fremtidige husreserve.
 - **Deaktivér og gendan** stopper planstyringen og skriver de oprindelige strømgrænser samt alle gemte TOU-tider, SOC-mål og ladeflag tilbage. Inverterens oprindelige drift kan derefter fortsætte; knappen slukker ikke inverteren.
 - Alle seks TOU-perioder anvender den aktuelle handling. Tidsgrænserne er faste 00/04/08/12/16/20 under styring; den løbende plan bestemmer handlingen, også over midnat.
-- Maksimalt 190 A samlet batteriladning med tilpasning til ladevinduet; afladning fortsat højst 90 A; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 9000 W opladning og 4500 W afladning. Den tidligere standard på 4500 W opladning hæves én gang til 9000 W i 0.8.11; brugerdefinerede lavere grænser bevares. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
+- Maksimalt 190 A samlet batteriladning med tilpasning til ladevinduet; afladning højst 190 A; lavere BMS-grænser samt de valgte effektgrænser har forrang. Planlægningsgrænser er højst 9000 W opladning og 4500 W afladning. Den tidligere standard på 4500 W opladning hæves én gang til 9000 W i 0.8.11; brugerdefinerede lavere grænser bevares. SOC-reserven er mindst 15 % og over inverterens Shutdown-niveau; Mål-SOC er højst 99 %.
 - Reservehold stopper afladning; soloverskud kan fortsat oplade. Netladning bruger periodens beregnede SOC-mål. Ved mål-SOC begrænses ladning med hysterese.
 - Der ændres ikke på BMS-grænser, Remote-mode, eksporttilstand, batterispændinger eller sikkerhedsindstillinger. Zero Export, Solar Sell fra og SOC/TOU skal allerede være korrekt indstillet.
 - Når Tesla lader, eller dens effekt er ukendt, beskyttes den beregnede husreserve også mod batteriforbrug til bilen. Tesla startes og stoppes ikke af denne version.
@@ -71,6 +71,11 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Loft for samlet ladning er 190 A; afladning forbliver højst 90 A. Lavere modtaget BMS-grænse respekteres. Ingen fordobling af den ene BMS-værdi og ingen automatisk forhøjelse til 240 A.
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
+
+### 0.8.18
+
+- Afladning hævet til højst 190 A samlet, begrænset af BMS, valgt effekt og SOC-reserve. Planlægning bruger samme loft. Tesla-beskyttelse blokerer fortsat afladning.
+- Tidligere standardloft på 4500 W afladning hæves én gang til 11000 W, så 190 A kan anvendes. Lavere brugergrænser bevares; efter migration kan loftet frit sænkes igen. Ingen ændring af BMS eller aktivering af eksport.
 
 ### 0.8.17
 
