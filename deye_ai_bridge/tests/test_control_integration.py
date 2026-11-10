@@ -91,3 +91,15 @@ class ReadRetryTests(unittest.TestCase):
         read,once,_=self.run_read([RuntimeError('Uventet Modbus-svar')])
         with self.assertRaises(RuntimeError):read(108,1)
         self.assertEqual(once.call_count,1)
+
+class DischargeSettingsTests(unittest.TestCase):
+    def test_migration_and_user_lower_limit(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'plan.json'
+            ns={'PLAN_FILE':path,'json':json}
+            fn=next(x for x in TREE.body if isinstance(x,ast.FunctionDef) and x.name=='energy_plan')
+            exec(compile(ast.Module(body=[fn],type_ignores=[]),'settings','exec'),ns)
+            for saved,expected in [({'max_discharge_w':4500},11000),({'max_discharge_w':3000},3000),({'max_discharge_w':4500,'discharge_profile':'190A-v1'},4500)]:
+                path.write_text(json.dumps(saved))
+                self.assertEqual(ns['energy_plan']()['max_discharge_w'],expected)
