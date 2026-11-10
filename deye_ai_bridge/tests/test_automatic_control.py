@@ -220,6 +220,51 @@ class ControllerTests(unittest.TestCase):
         for _ in range(4):self.c.tick();self.advance(15)
         self.assertEqual(self.c.state()['status'],'active')
 
+    def test_tesla_mode_blocks_grid_charge_and_discharge_then_restores_plan(self):
+        self.c.enable(True)
+        self.c.tesla_grid_mode(True)
+        self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],0)
+        self.assertEqual([self.r[a] for a in range(172,178)],[0]*6)
+        self.assertGreater(self.r[108],0) # Solar charging remains permitted.
+        self.action='use_battery';self.c.tick();self.assertEqual(self.r[109],0)
+        self.c.tesla_grid_mode(False);self.assertGreater(self.r[109],0)
+        self.assertFalse(self.c.state()['tesla_only_active'])
+
+    def test_tesla_mode_requires_active_automation(self):
+        with self.assertRaises(ValueError):self.c.tesla_grid_mode(True)
+        self.assertEqual(self.writes,[])
+
+    def test_tesla_mode_auto_finishes_after_confirmed_stop(self):
+        self.c.enable(True);self.c.tesla_grid_mode(True)
+        s=self.c.state();ctx=self.context();row=ctx['optimization']['hours'][0]
+        ctx['sample'].update(tesla_connected=1,tesla_charging_state='charging');ctx['tesla_power_kw']=11
+        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'hold')
+        ctx['sample']['tesla_charging_state']='stopped';ctx['tesla_power_kw']=0
+        self.c.tesla_override(s,ctx,row);self.advance(61)
+        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'grid_charge')
+        self.assertFalse(s['tesla_only_active'])
+
+    def test_tesla_mode_unknown_power_does_not_release_protection(self):
+        self.c.enable(True);self.c.tesla_grid_mode(True)
+        s=self.c.state();ctx=self.context();row=ctx['optimization']['hours'][0]
+        ctx['tesla_power_kw']=None;ctx['sample'].update(tesla_connected=None,tesla_charging_state='stopped')
+        s['tesla_only_seen_charging']=True;self.advance(1900)
+        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'hold')
+        self.assertTrue(s['tesla_only_active'])
+        self.advance(12*3600)
+        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'grid_charge')
+
+    def test_tesla_mode_survives_communication_recovery_but_manual_stop_cancels(self):
+        self.c.enable(True);self.c.tesla_grid_mode(True)
+        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        self.c.tick()
+        self.assertTrue(self.c.state()['tesla_only_active'])
+        self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],0)
+        self.c.disable();self.assertFalse(self.c.state()['tesla_only_active'])
+
     def test_charge_current_software_trip(self):
         self.plan['max_charge_w']=11000;self.c.enable(True)
         self.r[590]=65536-11500
