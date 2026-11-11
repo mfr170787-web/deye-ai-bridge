@@ -72,6 +72,14 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
 
+### 0.8.20
+
+- Timeplanen adskiller afsluttede timers målte batteriafladning, batteriladning og netkøb fra den løbende plan. En sen reservehold-vurdering mærker ikke længere hele den afsluttede time som netdrift.
+- Aktuel time viser målt energi indtil nu, plan for resten af timen og senest bekræftede indstilling i hver sin boks. Fremtidige timer viser forventet handling/SOC; begrundelse og historiske indstillinger kan foldes ud.
+- Tidsintegration med højst 120 sekunders mellemrum; datadækning vises i minutter. Manglende data bliver ikke nulforbrug. DC-batterienergi og AC-netenergi er separate målinger før/efter tab, ikke en tabsfri energibalance.
+- Mobilvisning bruger felter der ombrydes og automatisk højde; ingen tekst løber ind over næste time. Fire timers højde beregnes efter de viste kort. Aktuel time placeres fortsat øverst.
+- Ingen ændring i selve inverterstyringen.
+
 ### 0.8.19
 
 - Varigt elregister i `/data/monthly_register.db`, separat fra rå målehistorik. Gemmer kumulativ netkøbstæller, samlede timepriser og fremover Andel-/netprisdele. Ingen automatisk sletning.
