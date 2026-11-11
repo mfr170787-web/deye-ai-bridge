@@ -403,6 +403,29 @@ class ControllerTests(unittest.TestCase):
 
 
 class CalendarTests(unittest.TestCase):
+    def test_history_uses_measured_energy_even_when_last_plan_is_hold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plans=mod.DayPlans(Path(tmp)/'days.json');start=Date(2026,11,11,18,tzinfo=mod.TZ)
+            samples=[dict(created=(start+timedelta(minutes=i)).isoformat(),soc=55-i/60*6,battery_w=2000,grid_w=100) for i in range(61)]
+            row=dict(time=start.isoformat(),action='hold',price_dkk_kwh=5.36,projected_soc=49,reserve_soc=42)
+            events=[dict(kind='command_confirmed',at=start.isoformat(),command=dict(time=start.isoformat(),action='use_battery')),dict(kind='command_confirmed',at=(start+timedelta(minutes=59)).isoformat(),command=dict(time=start.isoformat(),action='hold'))]
+            view=plans.view({'hours':[row]},samples,events,now=start+timedelta(hours=1))
+            hour=view['days'][0]['hours'][18]
+            self.assertTrue(hour['past']);self.assertEqual(hour['action'],'hold')
+            self.assertEqual(hour['actual_energy']['battery_out_kwh'],2)
+            self.assertEqual(hour['actual_energy']['grid_import_kwh'],.1)
+            self.assertEqual(hour['actual_coverage_seconds'],3600)
+            self.assertEqual(hour['confirmed_actions'],['hold','use_battery'])
+
+    def test_energy_gap_is_not_invented_and_charge_discharge_are_separate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plans=mod.DayPlans(Path(tmp)/'days.json');start=Date(2026,11,11,18,tzinfo=mod.TZ)
+            samples=[dict(created=start.isoformat(),soc=55,battery_w=-2000,grid_w=100),dict(created=(start+timedelta(minutes=1)).isoformat(),soc=55,battery_w=2000,grid_w=100),dict(created=(start+timedelta(minutes=10)).isoformat(),soc=55,battery_w=2000,grid_w=100)]
+            h=plans.view({'hours':[]},samples,now=start+timedelta(hours=1))['days'][0]['hours'][18]
+            self.assertEqual(h['actual_coverage_seconds'],60)
+            self.assertAlmostEqual(h['actual_energy']['battery_out_kwh'],.008,places=3)
+            self.assertEqual(h['actual_energy']['battery_out_kwh'],h['actual_energy']['battery_in_kwh'])
+
     def test_missing_prices_dates_and_dst(self):
         with tempfile.TemporaryDirectory() as temp:
             plans=mod.DayPlans(Path(temp)/'days.json')
