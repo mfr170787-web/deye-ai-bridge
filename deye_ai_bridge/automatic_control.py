@@ -602,17 +602,47 @@ class DayPlans:
         rows=dict(data['rows']);rows.update({r['time']:r for r in model.get('hours',[])})
         by_utc={stamp(k).astimezone(timezone.utc):v for k,v in rows.items()}
         actual={}
+        ordered=[]
         for sample in samples:
             try:
-                hour=stamp(sample['created']).astimezone(TZ).replace(minute=0,second=0,microsecond=0).astimezone(timezone.utc)
-                slot=actual.setdefault(hour,dict(watts=[],soc=None))
+                at=stamp(sample['created']).astimezone(timezone.utc)
+                hour=at.astimezone(TZ).replace(minute=0,second=0,microsecond=0).astimezone(timezone.utc)
+                slot=actual.setdefault(hour,dict(watts=[],soc=None,coverage_seconds=0.,battery_out_kwh=0.,battery_in_kwh=0.,grid_import_kwh=0.))
                 if type(sample.get('battery_w')) in (float,int):slot['watts'].append(sample['battery_w'])
-                slot['soc']=sample.get('soc')
+                if sample.get('soc') is not None:slot['soc']=sample['soc']
+                ordered.append((at,sample))
             except (KeyError,ValueError,TypeError):continue
-        confirmed={}
+        ordered.sort(key=lambda x:x[0])
+        def positive_energy(a,b,seconds):
+            if a>=0 and b>=0:return (a+b)*.5*seconds/3600000
+            if a<=0 and b<=0:return 0.
+            return max(a,b)**2/abs(b-a)*.5*seconds/3600000
+        for (ta,a),(tb,b) in zip(ordered,ordered[1:]):
+            seconds=(tb-ta).total_seconds()
+            if not 0<seconds<=120:continue
+            begin=ta;stop=min(tb,now.astimezone(timezone.utc))
+            while begin<stop:
+                hour=begin.replace(minute=0,second=0,microsecond=0)
+                cut=min(stop,hour+timedelta(hours=1));duration=(cut-begin).total_seconds()
+                slot=actual.setdefault(hour,dict(watts=[],soc=None,coverage_seconds=0.,battery_out_kwh=0.,battery_in_kwh=0.,grid_import_kwh=0.))
+                fa=(begin-ta).total_seconds()/seconds;fb=(cut-ta).total_seconds()/seconds
+                valid=True
+                for key in ('battery_w','grid_w'):
+                    x,y=a.get(key),b.get(key)
+                    if type(x) not in (int,float) or type(y) not in (int,float) or not math.isfinite(x) or not math.isfinite(y):valid=False;break
+                if valid:
+                    x,y=a['battery_w'],b['battery_w'];left=x+(y-x)*fa;right=x+(y-x)*fb
+                    slot['battery_out_kwh']+=positive_energy(left,right,duration)
+                    slot['battery_in_kwh']+=positive_energy(-left,-right,duration)
+                    x,y=a['grid_w'],b['grid_w']
+                    slot['grid_import_kwh']+=positive_energy(x+(y-x)*fa,x+(y-x)*fb,duration)
+                    slot['coverage_seconds']+=duration
+                begin=cut
+        confirmed={};actions={}
         for event in events:
             if event.get('kind')=='command_confirmed':
                 key=stamp(event['command']['time']).astimezone(timezone.utc);confirmed[key]=event
+                actions.setdefault(key,set()).add(event['command']['action'])
         days=[]
         for offset in (0,1):
             date=now.date()+timedelta(days=offset)
@@ -624,7 +654,10 @@ class DayPlans:
                 m=actual.get(t,{})
                 row.update(time=t.astimezone(TZ).isoformat(),known=bool(row),past=t+timedelta(hours=1)<=now,
                            actual_battery_w=round(sum(m['watts'])/len(m['watts'])) if m.get('watts') else None,
-                           actual_soc=m.get('soc'),command_confirmed=confirmed.get(t))
+                           actual_soc=m.get('soc'),command_confirmed=confirmed.get(t),
+                           actual_energy={k:round(m.get(k,0),3) for k in ('battery_out_kwh','battery_in_kwh','grid_import_kwh')},
+                           actual_coverage_seconds=round(m.get('coverage_seconds',0)),
+                           confirmed_actions=sorted(actions.get(t,set())))
                 hours.append(row);t+=timedelta(hours=1)
             days.append(dict(date=date.isoformat(),hours=hours,known_hours=sum(r['known'] for r in hours)))
         return dict(created=datetime.now(timezone.utc).isoformat(),days=days,plan_created=model.get('created'))
