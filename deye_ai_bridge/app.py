@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.19"
+APP_VERSION = "0.8.20"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -1079,7 +1079,7 @@ def day_plan_view(model):
     now=datetime.now(ZoneInfo('Europe/Copenhagen'))
     cutoff=now.replace(hour=0,minute=0,second=0,microsecond=0).astimezone(timezone.utc).isoformat()
     with db() as conn:
-        samples=[dict(r) for r in conn.execute('SELECT created,soc,battery_w FROM samples WHERE created>=? ORDER BY id',(cutoff,))]
+        samples=[dict(r) for r in conn.execute('SELECT created,soc,battery_w,grid_w FROM samples WHERE created>=? ORDER BY id',(cutoff,))]
     return DAY_PLANS.view(model,samples,AUTO_CONTROL.report().get('events',[]),now)
 
 
