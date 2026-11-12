@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.23"
+APP_VERSION = "0.8.24"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -140,6 +140,91 @@ def ha_request(path, method="GET", data=None):
     )
     with urllib.request.urlopen(req, timeout=8) as response:
         return json.loads(response.read().decode())
+
+
+VICTRON_CONFIG = DATA_DIR / 'victron_selection.json'
+VICTRON_CONTROL_LOCK = threading.Lock()
+VICTRON_FIELDS = {
+    'charging': ('switch', 'charging'),
+    'current_limit': ('number', 'charging_current_limit'),
+    **{key: ('sensor', key) for key in (
+        'actual_charging_current', 'charge_mode', 'charger_status',
+        'l1_power', 'l2_power', 'l3_power', 'session_energy',
+        'session_time', 'total_energy', 'total_power')},
+}
+
+
+def victron_candidates(states):
+    indexed = {item['entity_id']: item for item in states}
+    candidates = []
+    for entity, item in indexed.items():
+        if not entity.startswith('switch.victron_') or not entity.endswith('_charging'):
+            continue
+        prefix = entity[len('switch.'):-len('charging')]
+        mapping = {key: domain + '.' + prefix + suffix for key, (domain, suffix) in VICTRON_FIELDS.items()}
+        if all(mapping[key] in indexed for key in ('charging', 'current_limit', 'charger_status', 'total_power', 'total_energy')):
+            candidates.append({'id': entity, 'name': item.get('attributes', {}).get('friendly_name', entity), 'entities': mapping})
+    return candidates
+
+
+def victron_selected():
+    try:
+        return json.loads(VICTRON_CONFIG.read_text()).get('id')
+    except (OSError, ValueError):
+        return None
+
+
+def victron_state():
+    states = ha_request('/states')
+    indexed = {item['entity_id']: item for item in states}
+    candidates = victron_candidates(states)
+    selected = next((c for c in candidates if c['id'] == victron_selected()), None)
+    fields = {}
+    if selected:
+        for key, entity in selected['entities'].items():
+            item = indexed.get(entity, {})
+            fields[key] = {'entity_id': entity, 'state': item.get('state', 'unavailable'),
+                           'unit': item.get('attributes', {}).get('unit_of_measurement', ''),
+                           'updated': item.get('last_updated')}
+    return {'fields': fields, 'candidates': [{'id': c['id'], 'name': c['name']} for c in candidates],
+            'selected': selected['id'] if selected else None, 'mode': 'manual_only'}
+
+
+def victron_action(body):
+    action = body.get('action')
+    if action not in ('select', 'on', 'off', 'current'):
+        raise ValueError('Ukendt Victron-handling')
+    with VICTRON_CONTROL_LOCK:
+        candidates = victron_candidates(ha_request('/states'))
+        if action == 'select':
+            selected = next((c for c in candidates if c['id'] == body.get('id')), None)
+            if not selected:
+                raise ValueError('Vælg en fundet Victron-lader')
+            VICTRON_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            temporary = VICTRON_CONFIG.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'id': selected['id']}))
+            temporary.replace(VICTRON_CONFIG)
+            return {'message': 'Lader valgt og gemt lokalt. Ingen ladekommando sendt.'}
+        selected = next((c for c in candidates if c['id'] == victron_selected()), None)
+        if not selected:
+            raise ValueError('Vælg først en Victron-lader i kortet')
+        if action == 'current':
+            value = body.get('value')
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 6 <= value <= 32 or int(value) != value:
+                raise ValueError('Ladestrøm skal være et helt tal fra 6 til 32 A')
+            domain, suffix = VICTRON_FIELDS['current_limit']
+            service, payload = 'number/set_value', {'value': int(value)}
+        else:
+            domain, suffix = VICTRON_FIELDS['charging']
+            service, payload = 'switch/turn_' + action, {}
+        entity = selected['entities']['current_limit' if action == 'current' else 'charging']
+        state = ha_request('/states/' + entity)
+        if state.get('state') in (None, 'unknown', 'unavailable'):
+            raise ValueError('Laderen er utilgængelig; kommandoen er ikke sendt')
+        payload['entity_id'] = entity
+        ha_request('/services/' + service, 'POST', payload)
+        return {'message': 'Kommando sendt til Home Assistant. Kontrollér status og faktisk effekt.',
+                'action': action}
 
 
 def deye_entities():
@@ -1468,6 +1553,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/victron'):
+                return self.send_json(victron_state())
             if path.endswith('/api/monthly-register'):
                 return self.send_json({'months':MONTHLY_REGISTER.months()})
             if path.endswith('/api/monthly-register/excel'):
@@ -1558,6 +1645,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/victron'):
+                if self.headers.get('X-Deye-Control') != '1':
+                    return self.send_json({'error':'Manglende styringsheader'},403)
+                return self.send_json(victron_action(body))
             if path.endswith('/api/automation'):
                 if self.headers.get('X-Deye-Control') != '1':
                     return self.send_json({'error':'Manglende styringsheader'},403)
