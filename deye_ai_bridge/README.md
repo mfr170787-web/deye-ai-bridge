@@ -72,6 +72,12 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
 
+### 0.8.23
+
+- Den midlertidige Tesla-blokering og dens start/stop-endpoints er fjernet. Brug batteritimeren Ingen afladning. Gamle Tesla-undtagelser genindlæses ikke ved aktivering.
+- Start/stop giver øjeblikkelig tydelig kvittering direkte under knapperne. Knaptekster viser Starter, Deaktiverer/gendanner, Efterkontrol eller Bekræftet. Gentagne tryk spærres under anmodningen og gendannelsens efterkontrol.
+- Statuspolling kan ikke genaktivere knapper under en igangværende anmodning eller overskrive resultatet med et ældre svar. Timerknapper bruger samme spærring og kvittering.
+
 ### 0.8.22
 
 - To batteritimere på 1–12 timer: ingen afladning og netopladning mod energiplanens mål-SOC. Ingen afladning tillader fortsat sol og netladning efter normal plan. Opladning tilpasser strømmen efter energi og tid og respekterer strøm-, effekt-, BMS- og SOC-grænser. Ved målet holdes batteriet uden afladning indtil udløb.
