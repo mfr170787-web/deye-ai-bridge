@@ -328,6 +328,36 @@ class ControllerTests(unittest.TestCase):
         self.r[588]=79;self.c.tick();self.assertEqual(self.r[108],0)
         self.r[588]=78;self.c.tick();self.assertEqual(self.r[108],86)
 
+    def test_weather_outage_continues_zero_solar_and_replans_when_soc_changes(self):
+        original=self.context
+        def fallback_context():
+            ctx=original();ctx['weather_updated']=self.now.timestamp()-10000;ctx['weather_error']='timeout'
+            ctx['optimization'].update(weather_mode='zero_solar',weather_notice='0 kWh sol')
+            ctx['optimization']['hours'][0]['pv_forecast_kwh']=0
+            return ctx
+        self.c.context=fallback_context;self.action='hold';self.c.enable(True)
+        self.advance(4*3600);self.c.tick()
+        self.assertEqual(self.c.state()['status'],'active')
+        self.assertEqual(self.c.state()['weather_notice'],'0 kWh sol')
+        self.r[588]=26;self.action='grid_charge';self.c.tick()
+        self.assertEqual(self.c.state()['command']['action'],'grid_charge')
+        self.assertGreater(self.r[128],0)
+        self.c.context=original;self.r[590]=65536-4000;self.c.tick()
+        self.assertEqual(self.c.state()['weather_notice'],'')
+
+    def test_stale_weather_never_credits_old_solar_and_bad_prices_still_block(self):
+        original=self.context
+        def invalid_context():
+            ctx=original();ctx['weather_updated']=0;ctx['weather_error']='timeout'
+            ctx['optimization'].update(weather_mode='zero_solar')
+            ctx['optimization']['hours'][0]['pv_forecast_kwh']=1
+            return ctx
+        self.c.context=invalid_context
+        with self.assertRaises(ValueError):self.c.enable(True)
+        self.assertEqual(self.writes,[])
+        self.c.context=original;self.badprice=True
+        with self.assertRaises(ValueError):self.c.enable(True)
+
     def test_stale_prices_and_configuration_block(self):
         for mutate in ('stale','badprice'):
             setattr(self,mutate,True)
