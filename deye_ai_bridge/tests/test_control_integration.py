@@ -30,11 +30,10 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.post({'action':'enable'},False)[1],403);self.auto.enable.assert_not_called()
         self.post({'action':'enable','cloud_off':True});self.auto.enable.assert_called_once_with(True)
         self.post({'action':'disable'});self.auto.disable.assert_called_once_with()
-    def test_tesla_mode_button_routes_and_header(self):
-        self.assertEqual(self.post({'action':'tesla_grid_on'},False)[1],403)
+    def test_retired_tesla_mode_is_rejected(self):
+        for action in ('tesla_grid_on','tesla_grid_off'):
+            self.assertEqual(self.post({'action':action})[1],400)
         self.auto.tesla_grid_mode.assert_not_called()
-        self.post({'action':'tesla_grid_on'});self.auto.tesla_grid_mode.assert_called_with(True)
-        self.post({'action':'tesla_grid_off'});self.auto.tesla_grid_mode.assert_called_with(False)
 
     def test_battery_timer_api_and_control_header(self):
         self.assertEqual(self.post({'action':'battery_timer','mode':'charge','hours':3},False)[1],403)
