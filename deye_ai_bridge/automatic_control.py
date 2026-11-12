@@ -28,10 +28,10 @@ def charge_window_request(ctx,row,soc,voltage):
     start=next((i for i,r in enumerate(rows) if r['time']==row['time']),None)
     if start is None or 'battery_power_w' not in row:return None,None
     window=[row]
-    for candidate in rows[start+1:]:
+    for candidate in ([] if row.get('_manual_charge_until') else rows[start+1:]):
         if candidate.get('action')!='grid_charge' or stamp(candidate['time'])-stamp(window[-1]['time'])!=timedelta(hours=1):break
         window.append(candidate)
-    end=stamp(window[-1]['time'])+timedelta(hours=1)
+    end=datetime.fromtimestamp(row['_manual_charge_until'],timezone.utc) if row.get('_manual_charge_until') else stamp(window[-1]['time'])+timedelta(hours=1)
     hours=max(1/60,(end-datetime.now(timezone.utc)).total_seconds()/3600)
     target=max(float(r.get('charge_target_soc',r['projected_soc'])) for r in window)
     capacity=float(ctx['plan'].get('battery_capacity_kwh',32))
@@ -263,7 +263,7 @@ class AutomaticControl:
                     raise ValueError('Oprindelige indstillinger ligger uden for understøttet gendannelse.')
             s=dict(status='enabling',restored=False,started=datetime.now(timezone.utc).isoformat(),endpoint=list(self.endpoint()),
                    baseline=baseline,expected=dict(baseline),pending=None,events=old.get('events',[]),observations=[],error=None,resume_attempts=old.get('resume_attempts',[]))
-            s.update({k:v for k,v in old.items() if k.startswith('tesla_only_')})
+            s.update({k:v for k,v in old.items() if k.startswith(('tesla_only_','battery_timer_'))})
             self.log(s,'enabled',baseline=baseline);self.save(s)
             try:
                 # No charge/discharge demand while reshaping the TOU schedule.
@@ -288,6 +288,7 @@ class AutomaticControl:
             for key in list(s):
                 if key.startswith('tesla_only_'):s.pop(key)
             s.update(tesla_only_active=enabled,effect_action=None)
+            if enabled:s['battery_timer_mode']=None
             if enabled:
                 s.update(tesla_only_started=time.time(),tesla_only_until=time.time()+12*3600,
                          tesla_only_seen_connected=ctx['sample'].get('tesla_connected')==1,
@@ -297,6 +298,41 @@ class AutomaticControl:
             except Exception as exc:
                 self.disable('fault: '+str(exc));raise
             return self.report()
+
+    def battery_timer(self,mode,hours=None):
+        if mode not in ('no_discharge','charge','cancel'):raise ValueError('Vælg en gyldig batteritimer.')
+        if mode!='cancel' and (type(hours) is not int or not 1<=hours<=12):raise ValueError('Vælg 1–12 hele timer.')
+        ctx=self.context()
+        with self.lock:
+            s=self.state()
+            if s.get('status')!='active':raise ValueError('Aktivér automatisk styring først.')
+            row,c,m,floor,maximum=self.guards(ctx)
+            s.update(battery_timer_mode=None if mode=='cancel' else mode,
+                     battery_timer_until=0 if mode=='cancel' else time.time()+hours*3600,
+                     effect_action=None)
+            if mode!='cancel':s['tesla_only_active']=False
+            self.log(s,'battery_timer_set',mode=mode,hours=hours,until=s['battery_timer_until']);self.save(s)
+            try:self.apply(s,ctx,row,c,m,floor,maximum)
+            except Exception as exc:
+                self.disable('fault: '+str(exc));raise
+            return self.report()
+
+    def timer_override(self,s,ctx,row):
+        mode=s.get('battery_timer_mode')
+        if not mode:return row
+        if time.time()>=s.get('battery_timer_until',0):
+            s['battery_timer_mode']=None;s['effect_action']=None
+            self.log(s,'battery_timer_finished',mode=mode,reason='Tid udløbet; ny normal plan fra faktisk SOC.')
+            self.save(s);return row
+        if mode=='no_discharge':
+            return {**row,'action':'hold' if row['action']=='use_battery' else row['action'],
+                    'reason':'Batteritimer: afladning blokeret indtil timeren udløber. Netladning følger den normale plan.'}
+        if mode=='charge':
+            return {**row,'action':'grid_charge','charge_target_soc':ctx['plan']['target_soc'],
+                    'projected_soc':ctx['plan']['target_soc'],'battery_power_w':0,
+                    '_manual_charge_until':s['battery_timer_until'],
+                    'reason':'Batteritimer: oplad mod valgt mål-SOC inden timerens udløb; derefter normal prisplan.'}
+        raise ValueError('Ukendt batteritimer i gemt tilstand.')
 
     def tesla_override(self,s,ctx,row):
         if not s.get('tesla_only_active'):return row
@@ -321,7 +357,7 @@ class AutomaticControl:
 
     def apply(self,s,ctx,row,c,m,floor,maximum):
         if s['endpoint']!=list(self.endpoint()):raise ValueError('Inverterforbindelsen er ændret.')
-        row=self.tesla_override(s,ctx,row)
+        row=self.timer_override(s,ctx,self.tesla_override(s,ctx,row))
         plan=ctx['plan'];soc=m['soc'];voltage=m['voltage_v'];action=row['action']
         charge=min(190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
         if charge>100:charge=5*(charge//5)
@@ -408,11 +444,11 @@ class AutomaticControl:
             self.generation+=1
             s=self.state()
             if reason=='manual_disable':
-                s['auto_resume']=False;s['tesla_only_active']=False;self.save(s)
+                s['auto_resume']=False;s['tesla_only_active']=False;s['battery_timer_mode']=None;self.save(s)
             if s.get('status') in ('disabled','fault') and s.get('restored',True):return self.report()
             if s.get('status')=='verifying_restore':return self.report()
             s['auto_resume']=(reason.startswith('fault: Modbus read,') and any(t in reason for t in ('TimeoutError','ConnectionError')))
-            if not s['auto_resume']:s['tesla_only_active']=False
+            if not s['auto_resume']:s['tesla_only_active']=False;s['battery_timer_mode']=None
             s.update(status='restoring',error=reason if reason!='manual_disable' else None,stop_reason=reason)
             self.log(s,'disable_requested',reason=reason);self.save(s)
             try:
