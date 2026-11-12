@@ -328,6 +328,58 @@ class ControllerTests(unittest.TestCase):
         self.r[588]=79;self.c.tick();self.assertEqual(self.r[108],0)
         self.r[588]=78;self.c.tick();self.assertEqual(self.r[108],86)
 
+    def test_no_discharge_timer_expires_and_restores_fresh_plan(self):
+        self.action='use_battery';self.c.enable(True)
+        self.c.battery_timer('no_discharge',1)
+        self.assertEqual(self.r[109],0)
+        self.advance(3590);self.c.tick();self.assertEqual(self.r[109],0)
+        self.advance(11);self.c.tick()
+        self.assertIsNone(self.c.state()['battery_timer_mode'])
+        self.assertGreater(self.r[109],0)
+        self.assertTrue(any(e['kind']=='battery_timer_finished' for e in self.c.state()['events']))
+
+    def test_charge_timer_uses_deadline_soc_and_all_limits(self):
+        self.action='hold';self.plan['max_charge_w']=11000;self.c.enable(True)
+        self.c.battery_timer('charge',1)
+        self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],190)
+        self.assertEqual(self.r[166],80)
+        self.c.battery_timer('charge',12)
+        self.assertGreater(self.r[128],0);self.assertLess(self.r[128],100)
+        self.r[212]=20;self.c.tick();self.assertLessEqual(self.r[128],20)
+        self.r[588]=80;self.c.tick();self.assertEqual(self.r[128],0)
+        self.assertEqual(self.r[109],0)
+        self.c.battery_timer('cancel');self.assertEqual(self.c.state()['command']['action'],'hold')
+        self.assertIsNone(self.c.state()['battery_timer_mode'])
+
+    def test_charge_timer_expiry_replans_and_modes_are_exclusive(self):
+        self.action='use_battery';self.c.enable(True)
+        self.c.tesla_grid_mode(True);self.c.battery_timer('charge',1)
+        self.assertFalse(self.c.state()['tesla_only_active'])
+        self.advance(3601);self.c.tick()
+        self.assertGreater(self.r[109],0);self.assertEqual(self.r[128],0)
+        self.c.battery_timer('no_discharge',1);self.c.tesla_grid_mode(True)
+        self.assertIsNone(self.c.state()['battery_timer_mode'])
+
+    def test_timer_requires_active_and_valid_hours_and_manual_stop_cancels(self):
+        with self.assertRaises(ValueError):self.c.battery_timer('charge',1)
+        self.c.enable(True)
+        for hours in (0,13,True,1.5,None):
+            with self.assertRaises(ValueError):self.c.battery_timer('charge',hours)
+        self.c.battery_timer('no_discharge',12);self.c.disable()
+        self.assertIsNone(self.c.state()['battery_timer_mode'])
+
+    def test_timer_deadline_survives_communication_recovery(self):
+        self.c.enable(True);self.c.battery_timer('no_discharge',2)
+        deadline=self.c.state()['battery_timer_until']
+        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
+        for _ in range(20):
+            self.advance(5);self.c.tick()
+            if self.c.state().get('restored'):break
+        self.c.tick()
+        self.assertEqual(self.c.state()['battery_timer_mode'],'no_discharge')
+        self.assertEqual(self.c.state()['battery_timer_until'],deadline)
+        self.assertEqual(self.r[109],0)
+
     def test_weather_outage_continues_zero_solar_and_replans_when_soc_changes(self):
         original=self.context
         def fallback_context():
