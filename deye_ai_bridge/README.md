@@ -119,3 +119,7 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 
 ### 0.8.16
 Tilføjer knappen “Tesla – lad uden husbatteri” under Automatisk styring. Kræver aktiv, godkendt automatik. Funktionen sætter afladningsgrænsen og husbatteriets netladning til nul; solopladning kan fortsætte. Den starter eller stopper ikke Teslaen. Normal energiplan genoptages ved knappen “Tilbage til normal plan”, efter bekræftet stop/frakobling over 60 sekunder, efter 30 minutter uden tilsluttet bil eller senest efter 12 timer. Ukendte bildata ophæver ikke straks beskyttelsen. Tilstanden bevares ved automatisk kommunikationsgenoptagelse, men annulleres ved manuelt stop og procesgenstart. Ved forbindelsesudfald/fejl kan gendannelse af de oprindelige indstillinger tillade afladning igen; funktionen er ingen uafhængig hardwarebeskyttelse.
+
+
+## 0.8.24 – Victron manuel lader
+Flytbart og sammenfoldeligt kort med manuel ladetilladelse tænd/sluk, ladegrænse 6–32 A og samtlige 12 kendte Victron-enheder. Finder Home Assistant-integrationens Victron-enheder. Brugeren vælger laderen én gang; valget gemmes kun i /data/victron_selection.json. Ingen private entitets-id’er ligger i kildekoden. Ingen automatisk EV-styring, ingen periodiske servicekald og ingen ændring af husbatteristyringen. Kommando sendt er adskilt fra faktisk effekt. Installationens strømgrænse skal overholdes.
