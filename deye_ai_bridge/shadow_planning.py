@@ -222,3 +222,20 @@ def power_limited_plan(plan, sample):
     limited['max_charge_w']=min(float(plan['max_charge_w']),min(190,charge)*voltage)
     limited['max_discharge_w']=min(float(plan['max_discharge_w']),min(190,discharge)*voltage)
     return limited
+
+
+def planning_weather(weather, updated, error, now):
+    """Never credit stale/failed solar forecasts. Prices and SOC stay independent."""
+    try:
+        age=now.timestamp()-float(updated or 0)
+        hourly=(weather or {}).get('hourly',{})
+        useful=False
+        for at,value in zip(hourly.get('time',[]),hourly.get('global_tilted_irradiance',[])):
+            dt=datetime.fromisoformat(at)
+            if dt.tzinfo is None:dt=dt.replace(tzinfo=now.tzinfo)
+            if dt>=now.replace(minute=0,second=0,microsecond=0) and value is not None and math.isfinite(float(value)) and float(value)>=0:
+                useful=True;break
+        valid=not error and 0<=age<=7200 and useful
+    except (ValueError,TypeError,AttributeError):valid=False
+    if valid:return weather,{'weather_mode':'forecast','weather_notice':''}
+    return {},{'weather_mode':'zero_solar','weather_notice':'Solprognosen er utilgængelig eller for gammel. Planen regner med 0 kWh sol og genberegnes fra faktisk SOC og aktuelle priser.'}
