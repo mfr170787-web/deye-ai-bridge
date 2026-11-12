@@ -183,9 +183,9 @@ class ControllerTests(unittest.TestCase):
         self.plan['max_discharge_w']=4500;self.c.tick();self.assertEqual(self.r[109],86)
         self.plan['max_discharge_w']=11000;self.r[588]=20;self.c.tick()
         self.assertEqual(self.r[109],0)
-        self.r[588]=30;self.c.tick();self.c.tesla_grid_mode(True)
+        self.r[588]=30;self.c.tick();self.c.battery_timer('no_discharge',1)
         self.assertEqual(self.r[109],0)
-        self.c.tesla_grid_mode(False);self.assertEqual(self.r[109],120)
+        self.c.battery_timer('cancel');self.assertEqual(self.r[109],120)
 
     def test_charge_window_uses_lower_current_when_time_allows(self):
         ctx=self.context();row=ctx['optimization']['hours'][0]
@@ -231,50 +231,10 @@ class ControllerTests(unittest.TestCase):
         for _ in range(4):self.c.tick();self.advance(15)
         self.assertEqual(self.c.state()['status'],'active')
 
-    def test_tesla_mode_blocks_grid_charge_and_discharge_then_restores_plan(self):
-        self.c.enable(True)
-        self.c.tesla_grid_mode(True)
-        self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],0)
-        self.assertEqual([self.r[a] for a in range(172,178)],[0]*6)
-        self.assertGreater(self.r[108],0) # Solar charging remains permitted.
-        self.action='use_battery';self.c.tick();self.assertEqual(self.r[109],0)
-        self.c.tesla_grid_mode(False);self.assertGreater(self.r[109],0)
-        self.assertFalse(self.c.state()['tesla_only_active'])
 
-    def test_tesla_mode_requires_active_automation(self):
-        with self.assertRaises(ValueError):self.c.tesla_grid_mode(True)
-        self.assertEqual(self.writes,[])
 
-    def test_tesla_mode_auto_finishes_after_confirmed_stop(self):
-        self.c.enable(True);self.c.tesla_grid_mode(True)
-        s=self.c.state();ctx=self.context();row=ctx['optimization']['hours'][0]
-        ctx['sample'].update(tesla_connected=1,tesla_charging_state='charging');ctx['tesla_power_kw']=11
-        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'hold')
-        ctx['sample']['tesla_charging_state']='stopped';ctx['tesla_power_kw']=0
-        self.c.tesla_override(s,ctx,row);self.advance(61)
-        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'grid_charge')
-        self.assertFalse(s['tesla_only_active'])
 
-    def test_tesla_mode_unknown_power_does_not_release_protection(self):
-        self.c.enable(True);self.c.tesla_grid_mode(True)
-        s=self.c.state();ctx=self.context();row=ctx['optimization']['hours'][0]
-        ctx['tesla_power_kw']=None;ctx['sample'].update(tesla_connected=None,tesla_charging_state='stopped')
-        s['tesla_only_seen_charging']=True;self.advance(1900)
-        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'hold')
-        self.assertTrue(s['tesla_only_active'])
-        self.advance(12*3600)
-        self.assertEqual(self.c.tesla_override(s,ctx,row)['action'],'grid_charge')
 
-    def test_tesla_mode_survives_communication_recovery_but_manual_stop_cancels(self):
-        self.c.enable(True);self.c.tesla_grid_mode(True)
-        self.c.disable('fault: Modbus read, register 148: TimeoutError: timed out')
-        for _ in range(20):
-            self.advance(5);self.c.tick()
-            if self.c.state().get('restored'):break
-        self.c.tick()
-        self.assertTrue(self.c.state()['tesla_only_active'])
-        self.assertEqual(self.r[109],0);self.assertEqual(self.r[128],0)
-        self.c.disable();self.assertFalse(self.c.state()['tesla_only_active'])
 
     def test_fractional_dispatch_reserve_does_not_block_integer_soc(self):
         original=self.context
@@ -353,12 +313,12 @@ class ControllerTests(unittest.TestCase):
 
     def test_charge_timer_expiry_replans_and_modes_are_exclusive(self):
         self.action='use_battery';self.c.enable(True)
-        self.c.tesla_grid_mode(True);self.c.battery_timer('charge',1)
-        self.assertFalse(self.c.state()['tesla_only_active'])
+        self.c.battery_timer('no_discharge',1);self.c.battery_timer('charge',1)
+        self.assertEqual(self.c.state()['battery_timer_mode'],'charge')
         self.advance(3601);self.c.tick()
         self.assertGreater(self.r[109],0);self.assertEqual(self.r[128],0)
-        self.c.battery_timer('no_discharge',1);self.c.tesla_grid_mode(True)
-        self.assertIsNone(self.c.state()['battery_timer_mode'])
+        self.c.battery_timer('charge',1);self.c.battery_timer('no_discharge',1)
+        self.assertEqual(self.c.state()['battery_timer_mode'],'no_discharge')
 
     def test_timer_requires_active_and_valid_hours_and_manual_stop_cancels(self):
         with self.assertRaises(ValueError):self.c.battery_timer('charge',1)
