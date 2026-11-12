@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.20"
+APP_VERSION = "0.8.21"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -43,7 +43,7 @@ from modbus_telemetry import ClockDiagnostics
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from monthly_register import MonthlyRegister
-from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan
+from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan, planning_weather
 
 TESLA_ENTITIES = {
     "tesla_connected": "binary_sensor.tessi_opladerkabel",
@@ -750,6 +750,7 @@ def optimization_plan(sample, prices, weather):
     if not sample:
         return {"status": "waiting", "message": "Venter på målinger.", "hours": []}
     now = datetime.now(ZoneInfo("Europe/Copenhagen"))
+    weather, weather_info = planning_weather(weather,CACHE.get("weather_updated"),CACHE.get("weather_error"),now)
     slots, count = forecast_slots(prices, weather, now)
     if not slots:
         return {"status": "waiting", "message": "Venter på fremtidige priser.", "hours": []}
@@ -772,7 +773,7 @@ def optimization_plan(sample, prices, weather):
             "created": now.isoformat(), "hours_available": len(rows), "learning_samples": count,
             "cheap_limit": cheap, "expensive_limit": expensive, "battery_capacity_kwh": capacity,
             "reserve_soc": dynamic["reserve_soc"], "target_soc": plan["target_soc"],
-            "initial_soc": initial_soc, "dynamic_reserve": dynamic,
+            "initial_soc": initial_soc, "dynamic_reserve": dynamic, **weather_info,
             "battery_sale_enabled": False, "read_only": True, "hours": rows}
 
 
