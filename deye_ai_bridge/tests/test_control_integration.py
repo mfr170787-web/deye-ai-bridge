@@ -19,7 +19,7 @@ TREE=ast.parse(SOURCE)
 class DispatchTests(unittest.TestCase):
     def setUp(self):
         h=next(x for x in TREE.body if isinstance(x,ast.ClassDef) and x.name=='Handler')
-        self.auto=SimpleNamespace(enable=Mock(return_value={'status':'active'}),disable=Mock(return_value={'status':'verifying_restore'}),tesla_grid_mode=Mock(return_value={'status':'active'}))
+        self.auto=SimpleNamespace(enable=Mock(return_value={'status':'active'}),disable=Mock(return_value={'status':'verifying_restore'}),tesla_grid_mode=Mock(return_value={'status':'active'}),battery_timer=Mock(return_value={'status':'active'}))
         ns=dict(BaseHTTPRequestHandler=BaseHTTPRequestHandler,json=json,urlparse=urlparse,AUTO_CONTROL=self.auto)
         exec(compile(ast.Module(body=[h],type_ignores=[]),'handler','exec'),ns);self.cls=ns['Handler']
     def post(self,body,header=True,path='/api/automation'):
@@ -35,6 +35,14 @@ class DispatchTests(unittest.TestCase):
         self.auto.tesla_grid_mode.assert_not_called()
         self.post({'action':'tesla_grid_on'});self.auto.tesla_grid_mode.assert_called_with(True)
         self.post({'action':'tesla_grid_off'});self.auto.tesla_grid_mode.assert_called_with(False)
+
+    def test_battery_timer_api_and_control_header(self):
+        self.assertEqual(self.post({'action':'battery_timer','mode':'charge','hours':3},False)[1],403)
+        self.auto.battery_timer.assert_not_called()
+        self.post({'action':'battery_timer','mode':'charge','hours':3})
+        self.auto.battery_timer.assert_called_with('charge',3)
+        self.post({'action':'battery_timer','mode':'cancel'})
+        self.auto.battery_timer.assert_called_with('cancel',None)
 
     def test_retired_start_and_unknown_action(self):
         for path in ('/api/charge20','/api/test-suite','/api/charge-test'):
