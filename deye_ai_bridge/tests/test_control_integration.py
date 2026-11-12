@@ -11,7 +11,7 @@ from unittest.mock import Mock
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from shadow_planning import reserve,limits,economic_dispatch,power_limited_plan
+from shadow_planning import reserve,limits,economic_dispatch,power_limited_plan,planning_weather
 
 SOURCE=(Path(__file__).resolve().parents[1]/'app.py').read_text()
 TREE=ast.parse(SOURCE)
@@ -51,7 +51,7 @@ class ModelTests(unittest.TestCase):
         slots=[dict(time=now+timedelta(hours=i),price=p,load=loads[i],pv=pvs[i],fraction=1.) for i,p in enumerate(prices)]
         rows=[dict(time=x['time'].isoformat(),price_dkk_kwh=x['price']) for x in slots]
         cfg=dict(battery_capacity_kwh=32,roundtrip_efficiency_percent=90,target_soc=80,minimum_soc_morning=20,max_charge_w=4500,max_discharge_w=4500,reserve_margin_percent=15)
-        ns=dict(datetime=Clock,ZoneInfo=ZoneInfo,forecast_slots=lambda *a:(slots,100),energy_plan=lambda:cfg,limits=limits,reserve=reserve,economic_dispatch=economic_dispatch,power_limited_plan=power_limited_plan)
+        ns=dict(datetime=Clock,ZoneInfo=ZoneInfo,planning_weather=planning_weather,CACHE={},forecast_slots=lambda *a:(slots,100),energy_plan=lambda:cfg,limits=limits,reserve=reserve,economic_dispatch=economic_dispatch,power_limited_plan=power_limited_plan)
         f=next(x for x in TREE.body if isinstance(x,ast.FunctionDef) and x.name=='optimization_plan')
         exec(compile(ast.Module(body=[f],type_ignores=[]),'model','exec'),ns)
         return ns['optimization_plan']({'soc':soc},rows,{})
