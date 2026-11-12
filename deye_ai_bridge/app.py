@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.21"
+APP_VERSION = "0.8.22"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -1563,6 +1563,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({'error':'Manglende styringsheader'},403)
                 if body.get('action')=='enable':
                     return self.send_json(AUTO_CONTROL.enable(body.get('cloud_off')))
+                if body.get('action')=='battery_timer':
+                    return self.send_json(AUTO_CONTROL.battery_timer(body.get('mode'),body.get('hours')))
                 if body.get('action')=='tesla_grid_on':
                     return self.send_json(AUTO_CONTROL.tesla_grid_mode(True))
                 if body.get('action')=='tesla_grid_off':
