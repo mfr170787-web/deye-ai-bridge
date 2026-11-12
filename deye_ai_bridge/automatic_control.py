@@ -158,9 +158,10 @@ class AutomaticControl:
             raise ValueError('Målinger er over 120 sekunder gamle eller ugyldige.')
         if ctx.get('price_source')!='Andel FlexEnergi + N1 og afgifter' or not 0<=time.time()-ctx.get('price_updated',0)<=3600:
             raise ValueError('Aktuelle samlede elpriser inkl. transport og afgifter mangler.')
-        if not 0<=time.time()-ctx.get('weather_updated',0)<=7200 or ctx.get('weather_error'):
-            raise ValueError('Solprognosen mangler eller er over to timer gammel.')
         model=ctx['optimization']
+        zero_solar=model.get('weather_mode')=='zero_solar' and bool(model.get('hours')) and all(r.get('pv_forecast_kwh')==0 for r in model['hours'])
+        if (not 0<=time.time()-ctx.get('weather_updated',0)<=7200 or ctx.get('weather_error')) and not zero_solar:
+            raise ValueError('Solprognosen mangler uden en genberegnet plan med 0 kWh sol.')
         if not 0 <= (now-stamp(model['created'])).total_seconds() <= 180:
             raise ValueError('Planen er ikke aktuel.')
         row=next((r for r in model['hours'] if stamp(r['time'])<=now<stamp(r['time'])+timedelta(hours=1)),None)
@@ -379,6 +380,11 @@ class AutomaticControl:
         if changed:
             self.log(s,'command_confirmed',command=desired,observed=m)
             s.update(signature=signature,command=desired,command_since=time.time())
+        notice=ctx['optimization'].get('weather_notice','')
+        weather_changed=notice!=s.get('weather_notice','')
+        if weather_changed:
+            self.log(s,'weather_fallback' if notice else 'weather_forecast_restored',notice=notice)
+        s['weather_notice']=notice
         s.update(status='active',observed=m,checked_at=datetime.now(timezone.utc).isoformat())
         record_observation=time.time()-s.get('last_observation',0)>=30
         if record_observation:
@@ -395,7 +401,7 @@ class AutomaticControl:
                 raise ValueError('Netladning er kommanderet, men ikke målt efter 120 sekunder.')
             if not allow_discharge and m['battery_w']>300:
                 raise ValueError('Reservehold er kommanderet, men batteriet aflader fortsat over 300 W.')
-        if changed or record_observation:self.save(s)
+        if changed or record_observation or weather_changed:self.save(s)
 
     def disable(self,reason='manual_disable'):
         with self.lock:
