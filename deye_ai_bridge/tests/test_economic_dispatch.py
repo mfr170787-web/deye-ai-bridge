@@ -61,3 +61,18 @@ class EconomicDispatchTests(unittest.TestCase):
         self.assertEqual(plan['max_discharge_w'],9000)
         sample['telemetry_json']=json.dumps({'raw_registers':{'587':5200,'212':190,'213':80}})
         self.assertEqual(power_limited_plan(plan,sample)['max_discharge_w'],4160)
+
+class WeatherFallbackTests(unittest.TestCase):
+    def test_stale_failed_missing_forecasts_use_zero_solar(self):
+        from shadow_planning import planning_weather
+        from datetime import datetime,timezone
+        now=datetime(2026,11,12,4,tzinfo=timezone.utc)
+        weather={'hourly':{'time':['2026-11-12T12:00:00+00:00'],'global_tilted_irradiance':[500]}}
+        for updated,error in [(now.timestamp()-7201,None),(now.timestamp(),'timeout'),(0,None)]:
+            safe,info=planning_weather(weather,updated,error,now)
+            self.assertEqual(safe,{});self.assertEqual(info['weather_mode'],'zero_solar')
+        safe,info=planning_weather(weather,now.timestamp(),None,now)
+        self.assertEqual(safe,weather);self.assertEqual(info['weather_mode'],'forecast')
+        safe,info=planning_weather({},now.timestamp(),None,now)
+        self.assertEqual(safe,{})
+        self.assertEqual(info['weather_mode'],'zero_solar')
