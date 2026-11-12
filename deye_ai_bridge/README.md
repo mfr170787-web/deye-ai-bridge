@@ -72,6 +72,12 @@ Retter en overgangsfejl: automatisk genoptagelse blev kort markeret som opgivet,
 - Ladning beregnes efter manglende SOC, kapacitet, ladetab og resterende tid i sammenhængende planlagte netladetimer, med 10 % tidsmargin og strømtrin på 5 A. Et langt ladevindue giver lavere strøm; loftet anvendes kun ved behov. Ændret prognose eller målt SOC medfører ny beregning.
 - Rene strømjusteringer afbryder ikke længere netladningsflagene. Små variationer dæmpes. Gamle 150A-profiler med 8000/9000 W hæves én gang til 11000 W, så 190 A kan udnyttes; andre brugergrænser bevares. Det er et effektloft, ikke et konstant effektkrav.
 
+### 0.8.21
+
+- Manglende, fejlramt eller for gammel solprognose stopper ikke længere prisstyringen alene. Hele planen genberegnes med 0 forventet sol fra faktisk SOC og aktuelle priser. Gyldig prognose genindgår automatisk, når den kan hentes igen. Fallback vises i status og styringslog; den er ikke en terminal fejlnotifikation.
+- Friske målinger, gyldige samlede priser, registerkontrol, SOC- og BMS-grænser kræves stadig. Ugyldig fallback med solenergi afvises. Manuel deaktivering og krav om manuel aktivering efter procesgenstart bevares.
+- Automatisk styring og Elregnskab er nu i samme flytbare kortsystem som resten af dashboardet, med Fold sammen/Fold ud, op/ned og træk. Placering og foldning gemmes i browseren.
+
 ### 0.8.20
 
 - Timeplanen adskiller afsluttede timers målte batteriafladning, batteriladning og netkøb fra den løbende plan. En sen reservehold-vurdering mærker ikke længere hele den afsluttede time som netdrift.
