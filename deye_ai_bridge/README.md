@@ -123,3 +123,11 @@ Tilføjer knappen “Tesla – lad uden husbatteri” under Automatisk styring. 
 
 ## 0.8.24 – Victron manuel lader
 Flytbart og sammenfoldeligt kort med manuel ladetilladelse tænd/sluk, ladegrænse 6–32 A og samtlige 12 kendte Victron-enheder. Finder Home Assistant-integrationens Victron-enheder. Brugeren vælger laderen én gang; valget gemmes kun i /data/victron_selection.json. Ingen private entitets-id’er ligger i kildekoden. Ingen automatisk EV-styring, ingen periodiske servicekald og ingen ændring af husbatteristyringen. Kommando sendt er adskilt fra faktisk effekt. Installationens strømgrænse skal overholdes.
+
+
+## 0.8.25 – økonomisk ladebehov og reserve efter prisperioden
+Netopladning har et loft på 90 % (eller et lavere gemt SOC-mål), ikke et fast mål. Soloverskud kan fylde videre til det gemte maksimum. Planen sammenligner alle kendte priser inklusive tab og gennemløbsomkostning. Seks timers gennemsnitligt husforbrug fra de sidste op til seks kendte timer danner en blød slutreserve; medianen af kendte priser bruges som tydeligt markeret prisestimat. Reserven er ikke obligatorisk dyr opladning. Planen genberegnes løbende, når priser, SOC og forbrug ændres.
+Natlig bilopladning kl. 18–07, målt via den valgte lokale Victron eller friske Tesla-data, blokerer husbatteriets afladning. Ingen automatisk kommando sendes til laderen. Beskyttelsen kræver aktiv husbatteristyring og aktuelle data; den er ikke en selvstændig hardwarebeskyttelse ved forbindelsestab.
+Lokalt batterikostregnskab gemmes i /data/battery_cost.json. Det estimerer vægtet netkost inklusive ladetab og soloverskud til 0,03 kr./kWh. Historisk energi og datagab markeres ukendt. Blandede energikilder er estimeret ud fra effektbalancen. Kostprisen er information; dispatch sammenligner fremtidige undgåelige omkostninger, så allerede betalt energi ikke fejlagtigt fastholdes. Nyt flytbart kort viser kendt og ukendt energi. Manuel batteriladetimer bevarer sit eksplicitte mål.
+
+Tesla-forbindelsen vælges nu én gang i kortet Tesla · lokal forbindelse. Konkrete id’er gemmes kun i /data/tesla_selection.json og hentes dynamisk fra Home Assistant. Første gang efter denne opdatering skal bilen vælges; tidligere historik og planer bevares. Registrering understøtter Fleet-enheder med fælles navnepræfiks og battery_level, charger_power samt charge_limit. Ingen bilkommando sendes ved valg.
