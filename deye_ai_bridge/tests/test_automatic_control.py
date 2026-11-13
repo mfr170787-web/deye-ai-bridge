@@ -421,6 +421,26 @@ class ControllerTests(unittest.TestCase):
         self.c.enable(True);self.advance(125);self.c.tick();self.verify_restore()
         self.assertEqual(self.c.state()['status'],'fault')
 
+    def test_night_ev_blocks_discharge_and_releases_to_fresh_plan(self):
+        original=self.context
+        night=[True]
+        def context():
+            ctx=original();ctx['night_ev_charging']=night[0];ctx['tesla_power_kw']=11
+            return ctx
+        self.c.context=context;self.action='use_battery';self.r[588]=80
+        self.c.enable(True);self.assertEqual(self.r[109],0)
+        self.assertIn('Natlig bilopladning',self.c.state()['command']['reason'])
+        night[0]=False;self.c.tick();self.assertGreater(self.r[109],0)
+
+    def test_normal_grid_target_never_exceeds_90(self):
+        self.plan['target_soc']=99
+        original=self.context
+        def context():
+            ctx=original();ctx['optimization']['hours'][0].update(charge_target_soc=99,projected_soc=99)
+            return ctx
+        self.c.context=context;self.c.enable(True)
+        self.assertEqual(self.r[166],90)
+
     def test_tesla_house_reserve(self):
         original=self.context
         def context():
