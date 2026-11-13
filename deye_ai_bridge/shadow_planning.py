@@ -137,17 +137,7 @@ def economic_dispatch(slots, plan, initial_soc):
     eta=(float(plan['roundtrip_efficiency_percent'])/100)**.5
     floor=capacity*float(plan['minimum_soc_morning'])/100
     ceiling=capacity*float(plan['target_soc'])/100
-    grid_ceiling=min(ceiling,capacity*.90)
     initial=max(0., min(capacity, float(initial_soc)*capacity/100))
-    # An unknown horizon is not a free refill. Protect six forecast house hours
-    # with a soft economic value, so expensive charging is never mandatory.
-    tail=horizon[-min(6,len(horizon)):]
-    house_kw=sum(max(0.,float(x['load'])) for x in tail)/len(tail)
-    terminal_reserve=min(grid_ceiling,max(floor,floor+house_kw*6*(1+float(plan.get('reserve_margin_percent',15))/100)/eta))
-    known_prices=sorted(float(x['price']) for x in horizon)
-    terminal_price=max(0.,known_prices[len(known_prices)//2])
-    terminal_value=terminal_price*eta
-
     # Initial energy above the configured target may still be used, never topped up.
     upper=max(ceiling,initial)
     lower=min(floor,initial)
@@ -175,16 +165,13 @@ def economic_dispatch(slots, plan, initial_soc):
                 if change < -1e-8 and after<floor-1e-8:
                     continue
                 ac=change/eta if change>=0 else change*eta
-                # Solar may fill above 90%; imported battery energy may not.
-                if change>1e-8 and deficit+ac>max(0.,deficit)+1e-8 and after>grid_ceiling+1e-8:
-                    continue
                 imported=max(0.,deficit+ac)
                 # Small throughput cost avoids pointless cycling at equal prices.
                 total=cost+imported*float(slot['price'])+abs(change)*.02
                 if total<next_costs.get(j,float('inf'))-1e-9:
                     next_costs[j]=total;back[j]=i
         parents.append(back);costs=next_costs
-    end=min(costs,key=lambda j:(costs[j]-terminal_value*min(max(0.,levels[j]-floor),max(0.,terminal_reserve-floor))-.03*max(0.,levels[j]-terminal_reserve),levels[j]))
+    end=min(costs,key=lambda j:(costs[j]-.03*levels[j],levels[j]))
     path=[end]
     for back in reversed(parents):
         end=back[end];path.append(end)
@@ -207,10 +194,8 @@ def economic_dispatch(slots, plan, initial_soc):
             delta=levels[path[m+1]]-levels[path[m]]
             if delta>1e-7:break
             need+=max(0.,-delta)
-        protected=min(upper,max(floor,levels[path[-1]])+need)/capacity*100
+        protected=min(upper,floor+need)/capacity*100
         target=after/capacity*100
-        reason+=f' Ukendt periode: økonomisk reservemål {terminal_reserve/capacity*100:.1f} % til cirka seks timers husforbrug; prisestimat {terminal_price:.3f} kr./kWh. Reserven købes kun, hvis det beregningsmæssigt kan betale sig. Estimatet er ikke en kendt fremtidig timepris.'
-
         rows.append({'time':slot['time'].isoformat(),'price_dkk_kwh':round(slot['price'],4),
                      'pv_forecast_kwh':round(slot['pv']*fraction,2),
                      'load_forecast_kwh':round(slot['load']*fraction,2),
@@ -218,8 +203,6 @@ def economic_dispatch(slots, plan, initial_soc):
                      'discharge_floor_soc':round(protected,1),
                      'battery_power_w':round(-ac/max(fraction,.001)*1000),
                      'projected_soc':round(target,1),'reserve_soc':round(protected,1),
-                     'unknown_horizon_reserve_soc':round(terminal_reserve/capacity*100,1),
-                     'unknown_horizon_price_estimate':round(terminal_price,4),'grid_soc_ceiling':round(grid_ceiling/capacity*100,1),
                      'reason':reason})
     return rows
 
