@@ -22,7 +22,7 @@ class EconomicDispatchTests(unittest.TestCase):
                 3.6337,3.6337,3.8337,4.8037,5.5437,7.2817,6.5717,5.7417,4.8017,3.6537,3.4437,3.0037]
         rows=economic_dispatch(self.slots(prices),self.plan,20)
         self.assertTrue(any(r['action']=='grid_charge' for r in rows[:6]))
-        self.assertFalse(any(r['action']=='grid_charge' for r in rows[6:]))
+        self.assertFalse(any(r['action']=='grid_charge' for r in rows[6:23]))
         self.assertTrue(all(r['action']=='use_battery' for r in rows[17:20]))
         self.assertTrue(all(r['projected_soc']>=20 for r in rows))
 
@@ -76,3 +76,22 @@ class WeatherFallbackTests(unittest.TestCase):
         safe,info=planning_weather({},now.timestamp(),None,now)
         self.assertEqual(safe,{})
         self.assertEqual(info['weather_mode'],'zero_solar')
+
+class HorizonPolicyTests(unittest.TestCase):
+    plan=EconomicDispatchTests.plan
+    slots=EconomicDispatchTests.slots
+    def test_grid_ceiling_90_and_solar_can_fill_further(self):
+        rows=economic_dispatch(self.slots([1,1,1,1,7,7,7,7],[1,1,1,1,7,7,7,7]),{**self.plan,'max_charge_w':11000},20)
+        self.assertTrue(all(r['projected_soc']<=90 for r in rows if r['action']=='grid_charge'))
+        solar=economic_dispatch(self.slots([2,7],[0,5],[15,0]),{**self.plan,'max_charge_w':11000},89)
+        self.assertGreater(solar[0]['projected_soc'],90)
+    def test_no_fixed_90_target_and_no_unprofitable_expensive_topup(self):
+        rows=economic_dispatch(self.slots([5,5,5],[.3,.3,.3]),self.plan,50)
+        self.assertFalse(any(r['action']=='grid_charge' for r in rows))
+        rows=economic_dispatch(self.slots([1,7],[1,1]),self.plan,20)
+        self.assertLess(rows[0]['projected_soc'],90)
+    def test_unknown_horizon_preserves_energy_without_inventing_hours(self):
+        rows=economic_dispatch(self.slots([2,2],[1,1]),self.plan,50)
+        self.assertEqual(len(rows),2)
+        self.assertGreater(rows[-1]['projected_soc'],20)
+        self.assertGreater(rows[0]['unknown_horizon_reserve_soc'],20)
