@@ -34,7 +34,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.24"
+APP_VERSION = "0.8.25"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -45,20 +45,20 @@ from energy_accounting import daily_energy
 from monthly_register import MonthlyRegister
 from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan, planning_weather
 
-TESLA_ENTITIES = {
-    "tesla_connected": "binary_sensor.tessi_opladerkabel",
-    "tesla_online": "binary_sensor.tessi_status",
-    "tesla_soc": "sensor.tessi_battery_level",
-    "tesla_charging_state": "sensor.tessi_charging",
-    "tesla_charger_power_kw": "sensor.tessi_charger_power",
-    "tesla_charger_current_a": "sensor.tessi_charger_current",
-    "tesla_charger_voltage_v": "sensor.tessi_charger_voltage",
-    "tesla_charge_energy_added_kwh": "sensor.tessi_charge_energy_added",
-    "tesla_charge_limit": "number.tessi_charge_limit",
-    "tesla_charge_current_limit_a": "number.tessi_charge_current",
-    "tesla_charge_switch": "switch.tessi_charge",
-    "tesla_time_to_full": "sensor.tessi_time_to_full_charge",
-}
+# Field names are generic. Actual entity IDs are selected and stored on the Pi.
+TESLA_ENTITIES = dict.fromkeys((
+    'tesla_connected','tesla_online','tesla_soc','tesla_charging_state',
+    'tesla_charger_power_kw','tesla_charger_current_a','tesla_charger_voltage_v',
+    'tesla_charge_energy_added_kwh','tesla_charge_limit','tesla_charge_current_limit_a',
+    'tesla_charge_switch','tesla_time_to_full'))
+TESLA_FIELDS = dict(zip(TESLA_ENTITIES, (
+    ('binary_sensor','opladerkabel'),('binary_sensor','status'),('sensor','battery_level'),
+    ('sensor','charging'),('sensor','charger_power'),('sensor','charger_current'),
+    ('sensor','charger_voltage'),('sensor','charge_energy_added'),('number','charge_limit'),
+    ('number','charge_current'),('switch','charge'),('sensor','time_to_full_charge'))))
+TESLA_SELECTION = DATA_DIR/'tesla_selection.json'
+TESLA_SELECTION_LOCK = threading.Lock()
+
 
 REGISTER_MAP = {
     117: ("Batteri LowBatt-SOC", "%", 1, False),
@@ -340,6 +340,43 @@ def addon_slug():
         return "deye_ai_bridge"
 
 
+def tesla_candidates(states):
+    indexed={item['entity_id']:item for item in states}
+    candidates=[]
+    for entity,item in indexed.items():
+        if not entity.startswith('sensor.') or not entity.endswith('_battery_level'):
+            continue
+        prefix=entity[len('sensor.'):-len('battery_level')]
+        mapping={key:domain+'.'+prefix+suffix for key,(domain,suffix) in TESLA_FIELDS.items()}
+        if not all(mapping[key] in indexed for key in ('tesla_soc','tesla_charger_power_kw','tesla_charge_limit')):
+            continue
+        candidates.append({'id':entity,'name':item.get('attributes',{}).get('friendly_name',entity),'entities':mapping})
+    return candidates
+
+
+def tesla_selection():
+    try:
+        return json.loads(TESLA_SELECTION.read_text()).get('id')
+    except (OSError,ValueError):
+        return None
+
+
+def tesla_devices():
+    candidates=tesla_candidates(ha_request('/states'))
+    return {'selected':tesla_selection(),'candidates':[{'id':c['id'],'name':c['name']} for c in candidates]}
+
+
+def select_tesla(body):
+    with TESLA_SELECTION_LOCK:
+        selected=next((c for c in tesla_candidates(ha_request('/states')) if c['id']==body.get('id')),None)
+        if not selected:
+            raise ValueError('Vælg en fundet Tesla')
+        TESLA_SELECTION.parent.mkdir(parents=True,exist_ok=True)
+        tmp=TESLA_SELECTION.with_suffix('.tmp')
+        tmp.write_text(json.dumps({'id':selected['id']}));tmp.replace(TESLA_SELECTION)
+        return {'message':'Tesla valgt og gemt lokalt. Ingen kommando sendt til bilen.'}
+
+
 def tesla_state():
     """Read the verified Tesla Fleet entities from Home Assistant without writing."""
     try:
@@ -353,7 +390,10 @@ def tesla_state():
         "tesla_charger_voltage_v", "tesla_charge_energy_added_kwh",
         "tesla_charge_limit", "tesla_charge_current_limit_a",
     }
-    for key, entity_id in TESLA_ENTITIES.items():
+    selected=next((c for c in tesla_candidates(list(states.values())) if c['id']==tesla_selection()),None)
+    if not selected:
+        return {'available':False,'error':'Vælg din Tesla i kortet Tesla · lokal forbindelse.'}
+    for key, entity_id in selected['entities'].items():
         item = states.get(entity_id)
         value = item.get("state") if item else None
         if key in numeric:
@@ -831,6 +871,67 @@ def forecast_slots(prices, weather, now):
     return slots, count
 
 
+BATTERY_COST_LOCK = threading.Lock()
+
+
+def battery_cost(sample=None, plan=None):
+    """Local estimated moving inventory. Unknown historical energy stays unknown."""
+    path=DATA_DIR/'battery_cost.json'
+    with BATTERY_COST_LOCK:
+        try:
+            state=json.loads(path.read_text())
+        except (OSError,ValueError):
+            state={}
+        if sample is not None:
+            plan=plan or energy_plan()
+            capacity=float(plan['battery_capacity_kwh'])
+            energy=max(0.,min(capacity,float(sample.get('soc') or 0)*capacity/100))
+            t=datetime.fromisoformat(sample['created']).timestamp()
+            previous=state.get('previous')
+            known=float(state.get('known_kwh',0));unknown=float(state.get('unknown_kwh',energy));cost=float(state.get('cost_dkk',0))
+            if previous and t>previous['t']:
+                dt=t-previous['t']
+                if dt<=120 and sample.get('battery_w') is not None and previous.get('battery_w') is not None:
+                    watts=(float(sample['battery_w'])+previous['battery_w'])/2
+                    if watts<0:
+                        added=-watts*dt/3600000
+                        pv=max(0.,(float(sample.get('pv_w') or 0)+previous['pv_w'])/2)
+                        load=max(0.,(float(sample.get('load_w') or 0)+previous['load_w'])/2)
+                        # Surplus PV is allocated first; ambiguous remainder is unknown.
+                        solar=min(added,max(0.,pv-load)*dt/3600000)
+                        grid=min(max(0.,added-solar),max(0.,(float(sample.get('grid_w') or 0)+previous['grid_w'])/2)*dt/3600000)
+                        price=previous.get('price')
+                        eta=(float(plan['roundtrip_efficiency_percent'])/100)**.5
+                        known+=solar;cost+=solar*.03
+                        if isinstance(price,(float,int)) and math.isfinite(price):
+                            known+=grid;cost+=grid*price/eta
+                        else:unknown+=grid
+                        unknown+=max(0.,added-solar-grid)
+                    elif watts>0:
+                        fraction=max(0.,1-watts*dt/3600000/max(known+unknown,.001))
+                        known*=fraction;unknown*=fraction;cost*=fraction
+                else:
+                    # No interpolation across missing telemetry. Reconcile as unknown.
+                    pass
+                total=known+unknown
+                if energy>total:unknown+=energy-total
+                elif total>0:
+                    scale=energy/total;known*=scale;unknown*=scale;cost*=scale
+            elif not previous:
+                known=cost=0.;unknown=energy
+            if not previous or t>previous['t']:
+                state={'known_kwh':known,'unknown_kwh':unknown,'cost_dkk':cost,
+                       'previous':{'t':t,'battery_w':sample.get('battery_w'),
+                                   'pv_w':float(sample.get('pv_w') or 0),'load_w':float(sample.get('load_w') or 0),
+                                   'grid_w':float(sample.get('grid_w') or 0),'price':sample.get('price_dkk')}}
+                path.parent.mkdir(parents=True,exist_ok=True)
+                tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(state));tmp.replace(path)
+        known=float(state.get('known_kwh',0));unknown=float(state.get('unknown_kwh',0))
+        return {'known_kwh':round(known,2),'unknown_kwh':round(unknown,2),
+                'known_cost_dkk_kwh':round(state.get('cost_dkk',0)/known,3) if known>.001 else None,
+                'basis':'Estimat: vægtet netpris inkl. ladetab; soloverskud 0,03 kr./kWh. Historisk og umålt energi er ukendt.'}
+
+
 def optimization_plan(sample, prices, weather):
     if not sample:
         return {"status": "waiting", "message": "Venter på målinger.", "hours": []}
@@ -1114,6 +1215,10 @@ def collect_sample():
         MONTHLY_REGISTER.ingest(sample,prices)
     except Exception as exc:
         print("Monthly register failed: %s"%exc,flush=True)
+    try:
+        battery_cost(sample)
+    except Exception as exc:
+        print('Battery cost register failed: %s'%exc,flush=True)
     maybe_send_tesla_reminder(sample, prices)
     publish_home_operation(sample, prices, weather)
     return sample
@@ -1147,6 +1252,30 @@ def daily_accounting(prices):
     return daily_energy(rows, prices, now, validated_tesla_power)
 
 
+def night_ev_charging(sample, now=None):
+    now = now or datetime.now(ZoneInfo('Europe/Copenhagen'))
+    if 7 <= now.hour < 18:
+        return False
+    # Prefer the locally selected EVSE. Reading never sends a charger command.
+    try:
+        data = victron_state()
+        fields = data.get('fields', {})
+        power = fields.get('total_power', {})
+        updated = datetime.fromisoformat(power.get('updated') or '')
+        if 0 <= now.timestamp()-updated.timestamp() <= 120:
+            watts = float(power['state']) * (1000 if power.get('unit') == 'kW' else 1)
+            if watts > 100:
+                return True
+        status = fields.get('charger_status', {})
+        updated = datetime.fromisoformat(status.get('updated') or '')
+        if 0 <= now.timestamp()-updated.timestamp() <= 120 and str(status.get('state','')).lower() in ('charging','start_charging'):
+            return True
+    except Exception:
+        pass
+    power = validated_tesla_power(sample)
+    return power is not None and power > .1
+
+
 def automation_context():
     if PLAN_FILE.exists():
         json.loads(PLAN_FILE.read_text())  # Corrupt saved settings must not silently arm using defaults.
@@ -1158,7 +1287,8 @@ def automation_context():
     DAY_PLANS.update(model)
     return dict(options=options(),plan=energy_plan(),sample=sample,optimization=model,tesla_power_kw=validated_tesla_power(sample),
                 price_source=CACHE.get('price_source'),price_updated=CACHE.get('price_updated',0),
-                weather_updated=CACHE.get('weather_updated',0),weather_error=CACHE.get('weather_error'))
+                weather_updated=CACHE.get('weather_updated',0),weather_error=CACHE.get('weather_error'),
+                night_ev_charging=night_ev_charging(sample))
 
 
 def day_plan_view(model):
@@ -1329,6 +1459,7 @@ def analysis_package(days=7):
         "configuration_safe.json": safe_cfg,
         "energy_plan.json": energy_plan(),
         "automatic_control.json": AUTO_CONTROL.report(),
+        "battery_cost.json": battery_cost(),
         "control_alerts.json": json.loads((DATA_DIR / "control_alerts.json").read_text()) if (DATA_DIR / "control_alerts.json").exists() else {},
         "clock_sync.json": json.loads((DATA_DIR / "clock_sync.json").read_text()) if (DATA_DIR / "clock_sync.json").exists() else {},
         "two_day_plan.json": DAY_PLANS.view(optimization,samples,AUTO_CONTROL.report().get("events",[])),
@@ -1553,6 +1684,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/tesla-selection'):
+                return self.send_json(tesla_devices())
+            if path.endswith('/api/battery-cost'):
+                return self.send_json(battery_cost())
             if path.endswith('/api/victron'):
                 return self.send_json(victron_state())
             if path.endswith('/api/monthly-register'):
@@ -1645,6 +1780,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.endswith('/api/tesla-selection'):
+                if self.headers.get('X-Deye-Control') != '1':
+                    return self.send_json({'error':'Manglende styringsheader'},403)
+                return self.send_json(select_tesla(body))
             if path.endswith('/api/victron'):
                 if self.headers.get('X-Deye-Control') != '1':
                     return self.send_json({'error':'Manglende styringsheader'},403)
