@@ -321,9 +321,6 @@ class AutomaticControl:
         if charge>100:charge=5*(charge//5)
         requested,window_target=charge_window_request(ctx,row,soc,voltage)
         if requested is not None:charge=min(charge,requested)
-        if action=='grid_charge' and not row.get('_manual_charge_until'):
-            if window_target is not None:window_target=min(90,window_target)
-            row={**row,'charge_target_soc':min(90,float(row.get('charge_target_soc',row['projected_soc'])))}
         previous=(s.get('command') or {}).get('charge_a')
         if previous is not None and abs(previous-charge)<=3:
             charge=min(previous,190,c[212],max(0,int(float(plan['max_charge_w'])/voltage)))
@@ -347,11 +344,6 @@ class AutomaticControl:
                 discharge_floor=min(100,house_reserve);reserve_for_car=True
         grid=action=='grid_charge' and soc<target and charge>0
         allow_discharge=action=='use_battery' and soc>discharge_floor
-        # Confirmed night-time EV charging must never drain the house battery.
-        night_ev=ctx.get('night_ev_charging',False)
-        if night_ev:
-            allow_discharge=False
-            row={**row,'reason':'Natlig bilopladning: husbatteriets afladning er blokeret. '+row['reason']}
         if not allow_discharge:discharge=0
         effective=action if grid or allow_discharge or action=='solar_charge' else 'hold'
         target_values=dict(s['expected'])
