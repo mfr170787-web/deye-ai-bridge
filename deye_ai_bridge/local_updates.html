@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="da"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deye · Opdateringer og gendannelse</title>
+<style>
+*{box-sizing:border-box}body{font:16px system-ui;background:#f2f6f8;color:#183447;max-width:960px;margin:24px auto;padding:0 18px;line-height:1.5}h1{font-size:28px}h2{font-size:20px;margin-top:0}section,.notice{background:#fff;border-radius:14px;padding:22px;margin:18px 0}button{background:#087e98;color:#fff;border:0;border-radius:9px;padding:13px 18px;font:inherit;cursor:pointer}button:disabled{background:#8da2ae;cursor:default}select,input{font:inherit;padding:12px;max-width:100%}select{width:100%}.bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.muted{color:#526a79}.notice{position:sticky;top:8px;z-index:3;border:3px solid #587787;box-shadow:0 3px 12px #0002}.notice h2{margin:0}.working{border-color:#087e98;background:#e8f7fc}.success{border-color:#208147;background:#eafaef}.warning{border-color:#a86b00;background:#fff6dc}.error{border-color:#b7312c;background:#fff0ef}.working h2:before{content:'◌ ';display:inline-block;animation:pulse 1s infinite}@keyframes pulse{50%{opacity:.3}}@media(prefers-reduced-motion:reduce){.working h2:before{animation:none}}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf3f6;padding:14px;border-radius:8px;font-size:12px}#summary,#blockers{white-space:pre-wrap}#blockers{color:#9d3029;font-weight:600}.badge{font-size:14px;color:#526a79}button,input,select{min-height:44px}label{display:block;margin:12px 0}
+</style>
+<h1>Opdateringer og gendannelse</h1>
+<p>Gennemgå forslaget og tryk <strong>Opdater</strong>. Dit lokale klik er godkendelsen; ingen kode skal indtastes.</p>
+<div id="notice" class="notice" role="status" aria-live="polite" aria-atomic="true"><h2 id="headline">Henter status …</h2><p id="detail"></p><button id="check">Kontrollér status</button></div>
+<section><h2>Installeret og klar til opdatering?</h2><p id="version"></p><p id="blockers" role="alert"></p>
+<button id="faultAck" hidden>Kontrollér og kvittér gendannet fejl</button>
+<p id="faultHelp" hidden class="muted">Knappen læser de oprindelige registre tre gange og kvitterer kun en allerede bekræftet gendannelse. Fejlen bevares i journalen. Ingen inverterkommando sendes, og automatikken startes ikke.</p></section>
+<section><div class="bar"><h2>1. Vælg et ventende forslag</h2><button id="refresh">Opdatér listen</button></div><select id="proposals"></select><p id="listNote" class="badge"></p></section>
+<section><h2>Eller upload en fil manuelt</h2><p>Denne reserve virker også, hvis dashboardprocessen ikke kan starte. Vælg en JSON-kodepakke fra chatten. Filen bliver kun gennemgået; den installeres først ved dit klik på Opdater.</p><label for="file">Manuel opdateringsfil · JSON, højst 800 KB</label><input type="file" id="file" accept=".json,application/json"><p id="fileNote" class="badge"></p></section>
+<section><h2>2. Gennemgå ændringen</h2><p id="summary">Vælg et forslag eller en fil.</p><p id="consequence"></p><details><summary>Vis kontrolsum og kodeændringer</summary><pre id="fingerprint"></pre><pre id="diff"></pre></details></section>
+<section><h2>3. Opdater</h2><p>Dit klik godkender præcis den viste pakke, backup, installation og genstart af Bridge-processen samt tilbageførsel til tidligere kode ved opstartsfejl. Automatikken skal være fra og forbliver fra.</p><p id="missing" class="muted"></p><button id="install" disabled>Opdater · backup og genstart Bridge</button><p class="muted">Denne side kører i den faste opstartsproces. Den kan stadig bruges, mens dashboardet genstarter eller er stoppet.</p></section>
+<script>
+const PAGE_NONCE='__LOCAL_PAGE_NONCE__';
+const el=id=>document.getElementById(id);
+const base=location.pathname.replace(/\/api\/private\/(?:updates|maintenance)\/ui\/?$/,'')+'/api/private/updates';
+const pendingKey='deye-local-update-sha';
+let reviewed=null,packageValue=null,busy=false,statusValue=null,items=[];
+function remember(id){try{if(id)sessionStorage.setItem(pendingKey,id);else sessionStorage.removeItem(pendingKey);}catch{}}
+function remembered(){try{return sessionStorage.getItem(pendingKey)||'';}catch{return '';}}
+function message(kind,title,detail=''){el('notice').className='notice '+kind;el('notice').setAttribute('aria-busy',kind==='working'?'true':'false');el('headline').textContent=title;el('detail').textContent=detail;}
+async function api(path,body){const abort=new AbortController();const timeout=setTimeout(()=>abort.abort(),body===undefined?15000:65000);try{const response=await fetch(base+path,{method:body===undefined?'GET':'POST',cache:'no-store',headers:body===undefined?{}:{'Content-Type':'application/json','X-Deye-Local-Page':PAGE_NONCE},body:body===undefined?undefined:JSON.stringify(body),signal:abort.signal});const result=await response.json();if(!response.ok){const error=Error(result.error||'Kald afvist');error.rejected=true;throw error;}return result;}finally{clearTimeout(timeout);}}
+function controls(){
+ const blockers=statusValue?.installation_blockers||[];
+ el('install').disabled=busy||!reviewed||!packageValue||!statusValue||blockers.length>0||!!remembered();
+ for(const id of ['refresh','proposals','file','faultAck','check'])el(id).disabled=busy;
+ el('missing').textContent=busy?'Behandler – tryk ikke igen.':remembered()?'En opdatering afventer statuskontrol. Tryk Kontrollér status; installationen sendes ikke igen.':!reviewed?'Mangler: vælg og gennemgå et aktuelt forslag eller en fil.':!statusValue?'Mangler: bekræftet driftsstatus.':blockers.length?'Installationen er blokeret af forholdene øverst.':'Klar. Dit klik på Opdater er den lokale godkendelse.';
+}
+async function readStatus(){
+ const state=await api('/status');statusValue=state;
+ el('version').textContent='Aktiv kode: '+(state.app_version||'ukendt')+' · Opstartsproces: '+state.core_version;
+ const blockers=state.installation_blockers||[];
+ el('blockers').textContent=blockers.length?'Installation blokeret:\n'+blockers.join('\n'):'Automatikstatus tillader opdatering. Kravene kontrolleres igen ved dit klik.';
+ const recover=state.fault_acknowledgement?.available===true;
+ el('faultAck').hidden=!recover;el('faultHelp').hidden=!recover;controls();return state;
+}
+function operation(state,id){
+ const op=state.operation||{};if(op.package_sha256!==id)return 'waiting';
+ if(op.status==='installed'&&state.active_release===op.target){remember('');message('success','Opdateringen er installeret og bekræftet','Aktiv kode '+state.app_version+' · Pakke '+id.slice(0,12)+' · Backup '+(op.backup||'ukendt')+' · Kontrolleret '+new Date().toLocaleTimeString('da-DK'));return 'installed';}
+ if((op.status||'').includes('rolled_back')){remember('');message('error','Opdateringen fejlede – tidligere kode er valgt igen','Status: '+op.status+'. Automatikken skal forblive fra, indtil resultatet er kontrolleret.');return 'failed';}
+ message('working','Opdateringen er registreret – venter på opstart','Pakke '+id.slice(0,12)+' · Backup '+(op.backup||'afventer')+'. Tryk ikke igen.');return 'working';
+}
+async function follow(id){
+ for(let i=0;i<60;i++){
+  try{const phase=operation(await readStatus(),id);if(phase==='installed'||phase==='failed')return phase;}
+  catch{message('warning','Forbindelsen mangler – resultat ikke bekræftet','Kontrollerer igen automatisk. Der sendes ikke en ny installation.');}
+  await new Promise(resolve=>setTimeout(resolve,2000));
+ }
+ message('warning','Resultatet er endnu ikke bekræftet','Tryk Kontrollér status eller genåbn siden. Den samme installation sendes ikke igen.');return 'unknown';
+}
+async function review(value,summary){
+ reviewed=null;packageValue=null;controls();
+ const snapshot=JSON.parse(JSON.stringify(value));
+ const result=await api('/local-preview',{package:snapshot});
+ reviewed=result;packageValue=snapshot;
+ el('summary').textContent=summary;el('consequence').textContent=result.consequence;
+ el('fingerprint').textContent='Pakke: '+result.package_sha256+'\nKodegrundlag: '+result.base_revision;
+ el('diff').textContent=Object.values(result.diffs).join('\n')||'Ingen kodeforskelle.';
+ await readStatus();
+ message(statusValue.installation_blockers.length?'warning':'info','Forslaget er gennemgået – intet er installeret',statusValue.installation_blockers.length?'Se blokeringen øverst.':'Gennemgå ændringen og tryk Opdater, når du vil installere.');controls();
+}
+async function selectProposal(){
+ if(busy)return;const id=el('proposals').value;reviewed=null;packageValue=null;controls();
+ if(!id)return;
+ busy=true;controls();try{const item=await api('/proposal?id='+encodeURIComponent(id));if(digestId(item)!==id)throw Error('Forslags-id afviger');await review(item.package,item.summary);el('file').value='';el('fileNote').textContent='';}
+ catch(error){message('error','Forslaget kunne ikke gennemgås',error.message);}
+ finally{busy=false;controls();}
+}
+function digestId(item){return item.proposal_id;}
+async function loadList(){
+ const data=await api('/list');items=data.proposals;const old=el('proposals').value;el('proposals').replaceChildren();
+ const empty=document.createElement('option');empty.value='';empty.textContent='Vælg et forslag';el('proposals').append(empty);
+ for(const item of items){const option=document.createElement('option');option.value=item.proposal_id;option.textContent=(item.status==='awaiting_approval'?'Afventer dit klik':'Forældet kodegrundlag')+' · '+item.files.join(', ')+' · '+new Date(item.submitted_at*1000).toLocaleString('da-DK');el('proposals').append(option);}
+ el('proposals').value=items.some(item=>item.proposal_id===old)?old:'';
+ el('listNote').textContent=items.length?items.length+' forslag. Vælg det nyeste aktuelle forslag.':'Ingen ventende forslag. Manuel filupload kan stadig bruges.';
+ if(data.invalid_entries)el('listNote').textContent+=' '+data.invalid_entries+' udløbne eller ugyldige forslag er udeladt.';
+}
+el('proposals').onchange=selectProposal;
+el('refresh').onclick=async()=>{if(busy)return;try{await loadList();await readStatus();if(el('proposals').value)await selectProposal();}catch(e){message('error','Listen eller status kunne ikke læses',e.message);}};
+el('file').onchange=async()=>{
+ if(busy)return;busy=true;reviewed=null;packageValue=null;controls();
+ try{const file=el('file').files[0];if(!file||file.size>800000)throw Error('Vælg en JSON-kodepakke på højst 800 KB');const value=JSON.parse(await file.text());el('proposals').value='';el('fileNote').textContent='Valgt fil: '+file.name+' · endnu ikke installeret';await review(value,'Manuel fil: '+file.name);}
+ catch(error){message('error','Filen kunne ikke gennemgås',error.message);}
+ finally{busy=false;controls();}
+};
+el('install').onclick=async()=>{
+ if(busy||el('install').disabled||!reviewed)return;
+ busy=true;const id=reviewed.package_sha256;remember(id);controls();
+ message('working','Dit klik er modtaget – kontrollerer pakken','Bridge kontrollerer præcis det gennemgåede indhold og driftsstatus.');el('notice').scrollIntoView({behavior:'smooth',block:'start'});
+ try{await api('/local-install',{package:packageValue,review_ticket:reviewed.review_ticket,acknowledge:true});message('working','Opdateringen er accepteret','Backup og installation er startet. Afventer bekræftet opstart.');await follow(id);reviewed=null;packageValue=null;await loadList();}
+ catch(error){
+  // Even an HTTP error after acceptance is resolved through operation status.
+  try{const state=await readStatus();if(state.operation?.package_sha256===id)await follow(id);else if(error.rejected){remember('');reviewed=null;packageValue=null;el('file').value='';message('error','Opdateringen blev afvist',error.message+'. Gennemgå forslaget eller filen igen før et nyt forsøg.');}else message('warning','Resultatet er ukendt',error.message+'. Tryk Kontrollér status; gentag ikke installationen.');}
+  catch{message('warning','Resultatet er ukendt','Svaret mangler. Tryk Kontrollér status; gentag ikke installationen.');}
+ }finally{busy=false;controls();}
+};
+el('check').onclick=async()=>{if(busy)return;busy=true;controls();try{const id=remembered();if(id)await follow(id);else{const state=await readStatus();if(state.operation?.package_sha256)operation(state,state.operation.package_sha256);else message('info','Status er læst','Ingen installation er registreret.');}}catch(e){message('error','Status kunne ikke læses',e.message);}finally{busy=false;controls();}};
+el('faultAck').onclick=async()=>{if(busy||!statusValue?.fault_acknowledgement?.available)return;busy=true;controls();message('working','Kontrollerer den gendannede tilstand','Læser de oprindelige registre tre gange. Ingen inverterkommando sendes.');try{await api('/local-fault-ack',{state_sha256:statusValue.fault_acknowledgement.state_sha256,acknowledge:true});await readStatus();message('success','Gendannelsen er kontrolleret – fejlen er kvitteret','Automatikken forbliver fra. Du kan nu gennemgå og installere opdateringen.');}catch(e){message('error','Fejlen kunne ikke kvitteres',e.message);}finally{busy=false;controls();}};
+async function initialize(){
+ try{await readStatus();await loadList();const id=remembered();if(id){busy=true;controls();await follow(id);}else if(statusValue.operation?.package_sha256)operation(statusValue,statusValue.operation.package_sha256);else message('info','Ingen installation er i gang','Vælg et forslag eller en manuel fil.');}
+ catch(e){message('error','Status eller forslag kunne ikke hentes',e.message);}
+ finally{busy=false;controls();}
+}
+initialize();
+</script></html>

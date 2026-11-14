@@ -11,8 +11,8 @@ import struct
 from datetime import datetime, timezone
 from maintenance import FILES, atomic_json, digest, sha
 
-VERSION = '0.9.5'
-OLD_REVISION = '7f8724599f658c12fed2479e2b9999a6941c2f592271c50d219abef0c1af68ee'
+VERSION = '0.9.6'
+OLD_REVISION = '24390caed18c3ad48521a4e5c970d18ecab55fc1845478ab10025451549d43ad'
 STALE_FAULT = 'fault: Målinger er over 120 sekunder gamle eller ugyldige.'
 GROUPS = ((108, 2), (128, 1), (148, 6), (166, 12))
 ADDRESSES = {str(a) for start, count in GROUPS for a in range(start, start+count)}
@@ -46,8 +46,9 @@ def read_registers(endpoint, timeout, start, count):
 
 
 def eligible(state):
-    return (state.get('status') == 'fault' and state.get('restored') is True
-            and state.get('error') == STALE_FAULT and state.get('pending') is None
+    return (((state.get('status') == 'fault' and state.get('error') == STALE_FAULT)
+             or (state.get('status') == 'disabled' and not state.get('error')))
+            and state.get('restored') is True and state.get('pending') is None
             and not state.get('auto_resume') and not state.get('tesla_only_active')
             and not state.get('battery_timer_mode'))
 

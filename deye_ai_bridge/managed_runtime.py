@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from maintenance import Maintenance, MAX_BYTES, atomic_json
 from image_recovery import prepare_image_recovery, VERSION as IMAGE_VERSION
+from local_updates import LocalUpdates
+from update_frontdoor import frontdoor_handler
 
 DATA = Path('/data')
 CORE = Path('/control')
@@ -80,8 +82,9 @@ def handler_class(manager):
 
 def spawn_bridge(manager):
     directory = manager.release_dir(manager.active())
-    env = dict(os.environ, DEYE_APP_DIR=str(directory), DEYE_MANAGED_RUNTIME='1', PYTHONDONTWRITEBYTECODE='1')
-    return subprocess.Popen([sys.executable, str(directory/'app.py')], cwd=directory, env=env,
+    env = dict(os.environ, DEYE_APP_DIR=str(directory), DEYE_MANAGED_RUNTIME='1',
+               DEYE_APP_PORT='8098', PYTHONDONTWRITEBYTECODE='1')
+    return subprocess.Popen([sys.executable, str(CORE/'bridge_child.py'), str(directory/'app.py')], cwd=directory, env=env,
                             user=1000, group=1000, extra_groups=[], umask=0o077, start_new_session=True)
 
 def main():
@@ -100,10 +103,14 @@ def main():
             'reason': type(exc).__name__})
         print('Gendannelsesopdatering kunne ikke forberedes; tidligere kode bevares: '+type(exc).__name__, flush=True)
     prepare_permissions(DATA)
-    print('Lokal godkendelsesnøgle til vedligeholdelse (kun til HA-siden; del den ikke i chat): '+manager.secret, flush=True)
+    print('Vedligeholdelse: lokal Opdater-knap uden kode; manuel filupload er tilgængelig.', flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', 8100), handler_class(manager))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    public = ThreadingHTTPServer(('0.0.0.0',8099),
+        frontdoor_handler(LocalUpdates(manager), CORE/'local_updates.html'))
+    public.daemon_threads = True
+    threading.Thread(target=public.serve_forever, daemon=True).start()
     threading.Thread(target=manager.event_worker, daemon=True).start()
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
@@ -125,7 +132,7 @@ def main():
         while time.monotonic()<deadline and not stopping.is_set():
             if child.poll() is not None: return False
             try:
-                with opener.open('http://127.0.0.1:8099/api/private/runtime-health', timeout=2) as response:
+                with opener.open('http://127.0.0.1:8098/api/private/runtime-health', timeout=2) as response:
                     if json.load(response).get('ready') is True: return True
             except Exception: pass
             stopping.wait(0.5)
@@ -144,7 +151,8 @@ def main():
             if not success:
                 child = start()
                 if not healthy(child):
-                    raise RuntimeError('Tidligere Bridge-kode kunne ikke starte efter tilbageførsel')
+                    print('Tidligere kode kunne heller ikke starte. Manuel upload er stadig tilgængelig.',flush=True)
+        child_failure_reported = False
         while not stopping.wait(0.25):
             if manager.restart.is_set() and time.monotonic()>=manager.restart_after:
                 with manager.lock:
@@ -161,13 +169,16 @@ def main():
                     child = start()
                     if not healthy(child):
                         print('Tidligere Bridge-kode kunne heller ikke starte. Manuel kontrol kræves.', flush=True)
-                        break
+                        print('Vedligeholdelse og manuel upload forbliver tilgængelig.',flush=True)
+                child_failure_reported = False
             elif child.poll() is not None:
                 # No unapproved automatic code switching or restart loop.
-                print('Bridge-processen stoppede uventet; ingen ny release aktiveres.', flush=True)
-                break
+                if not child_failure_reported:
+                    print('Bridge-processen stoppede. Ingen automatisk genstart; manuel upload er tilgængelig.', flush=True)
+                    child_failure_reported = True
     finally:
         stop(child)
         server.shutdown()
+        public.shutdown()
 
 if __name__ == '__main__': main()

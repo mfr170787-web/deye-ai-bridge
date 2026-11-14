@@ -1,18 +1,18 @@
-# Deye AI Bridge 0.9.5
+# Deye AI Bridge 0.9.6
 
-Lokal Deye-styring og opdateringer med tydelig status.
+## Målinger og status
+Kernemålinger gemmes før langsomme pris-/vejr-/Tesla-opslag og planberegning. Baggrundsopgaver kører særskilt; transportkøen er FIFO. Tidsstempler beskriver starten af målingen, og statuskald viser en frisk enkel måling uden en tung analyseberegning. 120-sekunders sikkerhedsstoppet bevares. Fejlens fulde løsning skal stadig bekræftes på anlægget.
 
-## Opdatering fra den fastlåste 120-sekunders fejl
+## Opdater uden kode
+Åbn **Vedligeholdelse** i dashboardets top. Vælg et forslag eller en manuel JSON-kodepakke, gennemgå ændringen og tryk **Opdater · backup og genstart Bridge**. Dit lokale klik er godkendelsen; ingen kode eller efterfølgende chatgodkendelse kræves. Godkendelsen er bundet til præcis den gennemgåede pakke. Automatikken skal være fra og forbliver fra.
 
-Opdatér den eksisterende app gennem Home Assistant med backup, mens automatikken er slået fra. Installationspakken kontrollerer den kendte gamle kode og fejlstatus og læser de oprindelige inverterregistre tre gange. Kun ved bekræftet gendannelse kvitteres fejlen, med bevaret fejljournal og backup. Automatikken forbliver deaktiveret. Der sendes ingen inverterkommandoer fra gendannelsesmigrationen.
+## Reserve når dashboardet fejler
+Vedligeholdelsessiden kører i den faste opstartsproces og forbliver tilgængelig, hvis dashboardprocessen ikke starter. Upload en JSON-kodepakke på højst 800 KB manuelt, gennemgå den og opdater. Den samme backup, kontrol og tilbageførsel bruges. En uafklaret installation gentages ikke automatisk; Kontrollér status afklarer resultatet.
 
-Ved afvigelser, ukendt kodegrundlag eller forbindelsesfejl vælges den tidligere kode; se appens log og vedligeholdelsesstatus. En blokeret migration gentages ikke automatisk. Efter opdateringen skal aktiv kodeversion 0.9.5, gendannelsesresultat og friske målinger kontrolleres før særskilt genaktivering.
+En gendannet 120-sekunders fejl kan kvitteres lokalt efter tre nye registerkontroller uden inverterkommandoer. Fremmede værdier eller uafklaret gendannelse blokerer fortsat installation.
 
-## Rettelser
+## Installation
+Denne version kræver én almindelig HA-opdatering med backup, da den ændrer den faste opstartsproces. Kun kendt 0.9.5-kodegrundlag med bekræftet inaktiv/gendannet tilstand migreres automatisk efter tre registerkontroller. Derefter kræver normale Bridge-kodeforslag og manuel upload ikke GitHub. Faste systemafhængigheder/opstartsprocessen kræver stadig særskilte HA-installationspakker ved fremtidige ændringer.
 
-- Statusaflæsning blokerer ikke måleopsamlingen på styringens lås.
-- Deaktivér og gendan kan kvittere en allerede verificeret fejl efter tre nye registerkontroller; fejlen bevares i journalen.
-- Vedligeholdelse viser modtaget klik, manglende oplysninger, installationsblokering, opstart, bekræftet succes og fejl. Mistet svar giver statuskontrol uden ny installation.
-- Aktuel analyse, ventende kodeforslag og den korrigerede reserveberegning indgår i installationspakken.
-
-120-sekunders sikkerhedsgrænse, lokal godkendelsesnøgle og kravet om særskilt aktivering af automatisk drift bevares. Opdateringen stopper og starter kun denne Bridge-app.
+## Validering
+139 Python-tests består; én root-rettighedstest kræver et andet testmiljø. Syv simulerede UI-forløb består. Containerbygning og fysisk drift på HA afventer installation og kontrol. Se RELEASE_0.9.6.md for præcis afgrænsning og konsekvenser.

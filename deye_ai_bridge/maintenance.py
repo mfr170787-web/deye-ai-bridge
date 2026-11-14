@@ -281,8 +281,8 @@ class Maintenance:
             for node in tree.body:
                 if isinstance(node, ast.Assign) and any(isinstance(target,ast.Name) and target.id=='APP_VERSION' for target in node.targets):
                     if isinstance(node.value,ast.Constant) and isinstance(node.value.value,str):version=node.value.value
-            return {'core_version': '1.0.1', 'app_version': version, 'active_release': self.active(), 'revision': self.revision(),
-                    'image_recovery': self.read_private('image-0.9.5.json'),
+            return {'core_version': '1.1.0', 'app_version': version, 'active_release': self.active(), 'revision': self.revision(),
+                    'image_recovery': self.read_private('image-0.9.6.json'),
                     'approval_required': True, 'approved_sha256': approval.get('sha256') if approval.get('expires',0)>self.clock() else None,
                     'operation': self.read_private('operation.json'),
                     'releases': ['base'] + sorted(p.name for p in self.code.iterdir() if p.is_dir() and valid_hash(p.name)),

@@ -1,6 +1,38 @@
 """Read-only interpretation of Deye V105-family registers, with raw evidence."""
 from datetime import datetime
 from contextlib import contextmanager
+from collections import deque
+import threading
+import time
+
+
+class FairModbusGate:
+    """FIFO transport access: an active controller cannot starve the collector."""
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.waiters = deque()
+        self.held = False
+
+    def acquire(self, timeout):
+        ticket = object()
+        deadline = time.monotonic()+timeout
+        with self.condition:
+            self.waiters.append(ticket)
+            while self.held or self.waiters[0] is not ticket:
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    self.waiters.remove(ticket)
+                    self.condition.notify_all()
+                    return False
+                self.condition.wait(remaining)
+            self.waiters.popleft()
+            self.held = True
+            return True
+
+    def release(self):
+        with self.condition:
+            self.held = False
+            self.condition.notify_all()
 
 
 REGISTERS = {
@@ -179,3 +211,4 @@ class ClockDiagnostics:
             except Exception as exc:
                 self.last_error = str(exc)
             time.sleep(5)
+

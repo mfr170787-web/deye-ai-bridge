@@ -36,12 +36,12 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.9.6"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
 from charge20_test import Charge20Test
-from modbus_telemetry import ClockDiagnostics
+from modbus_telemetry import ClockDiagnostics, FairModbusGate
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from monthly_register import MonthlyRegister
@@ -414,7 +414,7 @@ def tesla_state():
 
 
 
-MODBUS_LOCK = threading.Lock()
+MODBUS_LOCK = FairModbusGate()
 MODBUS_DIAGNOSTIC_LOCK = threading.Lock()
 MODBUS_ERRORS = deque(maxlen=200)
 
@@ -569,15 +569,21 @@ def save_energy_plan(data):
     return plan
 
 
+@contextmanager
 def db():
     conn = sqlite3.connect(DB_FILE, timeout=10)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with db() as conn:
+        conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS samples (
           id INTEGER PRIMARY KEY, created TEXT NOT NULL, soc REAL, battery_w REAL,
@@ -1152,25 +1158,47 @@ def read_optional_telemetry(regs):
     return decode_telemetry(raw, clock_reference, errors)
 
 
+ENRICHMENT_LOCK = threading.Lock()
+ENRICHMENT_WAKE = threading.Event()
+ENRICHMENT_CACHE = {}
+CORE_LAST_REGS = {}
+COLLECTOR_STATUS = {'stage':'not_started'}
+
+
+def collector_stage(stage, **fields):
+    # One immutable dictionary assignment lets status readers see progress
+    # without waiting on either transport or controller locks.
+    global COLLECTOR_STATUS
+    COLLECTOR_STATUS = {**COLLECTOR_STATUS, 'stage':stage,
+                        'stage_at':datetime.now(timezone.utc).isoformat(), **fields}
+
+
 def collect_sample():
+    global CORE_LAST_REGS
+    began = time.monotonic()
+    measured_at = datetime.now(timezone.utc).isoformat()
+    collector_stage('core_registers', cycle_started=measured_at)
     regs = {}
-    for start, count in [(117, 1), (141, 37), (514, 16), (587, 5), (616, 4), (650, 4), (672, 2)]:
-        for item in read_holding(start, count):
-            regs[item["address"]] = item
-    telemetry = read_optional_telemetry(regs)
+    for start, count in [(117,1),(141,37),(514,16),(587,5),(616,4),(650,4),(672,2)]:
+        collector_stage('core_registers', register_start=start)
+        for item in read_holding(start,count):
+            regs[item['address']] = item
+    # No internet, HA, optimizer, notification or optional Modbus reads may
+    # run before committing these measurements. Cached extras expire safely.
+    with ENRICHMENT_LOCK:
+        extras = dict(ENRICHMENT_CACHE)
+    prices = CACHE.get('prices') or []
+    weather = CACHE.get('weather') or {}
+    solar_tomorrow = None
+    daily = weather.get('daily',{}).get('shortwave_radiation_sum',[])
+    if len(daily)>1 and daily[1] is not None:solar_tomorrow=float(daily[1])
+    tesla = extras.get('tesla',{}) if time.time()-extras.get('tesla_at',0)<=120 else {}
+    telemetry = dict(extras.get('telemetry',{}))
+    telemetry['cached_at'] = extras.get('telemetry_at')
+    telemetry['core_measurement_at'] = measured_at
     market_error = None
-    try:
-        prices, weather = market_data()
-    except Exception as exc:
-        # Live Modbus data must never become stale because an internet service is unavailable.
-        prices, weather = CACHE.get("prices") or [], CACHE.get("weather") or {}
-        market_error = str(exc)
-    daily = weather.get("daily", {}) if weather else {}
-    solar_values = daily.get("shortwave_radiation_sum", [])
-    solar_tomorrow = float(solar_values[1]) if len(solar_values) > 1 else None
-    tesla = tesla_state()
     sample = {
-        "created": datetime.now(timezone.utc).isoformat(), "soc": regs.get(588, {}).get("value"),
+        "created": measured_at, "soc": regs.get(588, {}).get("value"),
         "battery_w": regs.get(590, {}).get("value"), "grid_w": regs.get(619, {}).get("value"),
         "grid_l1_w": regs.get(616, {}).get("value"),
         "grid_l2_w": regs.get(617, {}).get("value"),
@@ -1193,7 +1221,7 @@ def collect_sample():
     }
     for key in [*TESLA_ENTITIES, "tesla_power_updated"]:
         sample[key] = tesla.get(key)
-    action, title, explanation, details = planner(sample, prices, weather)
+    collector_stage('commit_sample')
     with db() as conn:
         columns = [
             "created", "soc", "battery_w", "grid_w", "grid_l1_w", "grid_l2_w", "grid_l3_w",
@@ -1203,26 +1231,64 @@ def collect_sample():
             "price_dkk", "solar_tomorrow", *TESLA_ENTITIES.keys(), "tesla_power_updated", "telemetry_json",
         ]
         values = [json.dumps(sample["tou"]) if key == "tou_json" else sample.get(key) for key in columns]
-        conn.execute(
+        cursor = conn.execute(
             "INSERT INTO samples(%s) VALUES(%s)" % (",".join(columns), ",".join("?" for _ in columns)),
             values,
         )
-        last = conn.execute("SELECT action,title,details_json,created FROM decisions ORDER BY id DESC LIMIT 1").fetchone()
-        should_add = not last or last["action"] != action or time.time() - datetime.fromisoformat(last["created"]).timestamp() > 3600
-        if should_add:
-            conn.execute("INSERT INTO decisions(created,action,title,explanation,details_json) VALUES(?,?,?,?,?)",
-                         (sample["created"], action, title, explanation, json.dumps(details, ensure_ascii=False)))
-    try:
-        MONTHLY_REGISTER.ingest(sample,prices)
-    except Exception as exc:
-        print("Monthly register failed: %s"%exc,flush=True)
-    try:
-        battery_cost(sample)
-    except Exception as exc:
-        print('Battery cost register failed: %s'%exc,flush=True)
-    maybe_send_tesla_reminder(sample, prices)
-    publish_home_operation(sample, prices, weather)
+        sample['id'] = cursor.lastrowid
+    collector_stage('waiting', last_sample_id=sample['id'],
+                    last_sample_at=measured_at, last_cycle_seconds=round(time.monotonic()-began,3),
+                    last_error=None)
+    CORE_LAST_REGS = dict(regs)
+    ENRICHMENT_WAKE.set()
     return sample
+
+
+def enrichment_cycle():
+    # Slow work is isolated from both the measurement timer and the HTTP status
+    # endpoint. The event coalesces work rather than building an unbounded queue.
+    prices, weather = market_data()
+    tesla = tesla_state()
+    with ENRICHMENT_LOCK:
+        ENRICHMENT_CACHE.update(tesla=tesla,tesla_at=time.time())
+    telemetry = read_optional_telemetry(dict(CORE_LAST_REGS))
+    with ENRICHMENT_LOCK:
+        ENRICHMENT_CACHE.update(telemetry=telemetry,telemetry_at=time.time())
+    with db() as conn:
+        row=conn.execute('SELECT * FROM samples ORDER BY id DESC LIMIT 1').fetchone()
+    if row is None:return
+    sample=dict(row)
+    if time.time()-datetime.fromisoformat(sample['created']).timestamp()>120:return
+    action,title,explanation,details=planner(sample,prices,weather)
+    with db() as conn:
+        last=conn.execute('SELECT action,created FROM decisions ORDER BY id DESC LIMIT 1').fetchone()
+        if not last or last['action']!=action or time.time()-datetime.fromisoformat(last['created']).timestamp()>3600:
+            conn.execute('INSERT INTO decisions(created,action,title,explanation,details_json) VALUES(?,?,?,?,?)',
+                         (sample['created'],action,title,explanation,json.dumps(details,ensure_ascii=False)))
+    for name,call in [('monthly_register',lambda:MONTHLY_REGISTER.ingest(sample,prices)),
+                      ('battery_cost',lambda:battery_cost(sample)),
+                      ('tesla_reminder',lambda:maybe_send_tesla_reminder(sample,prices)),
+                      ('home_operation',lambda:publish_home_operation(sample,prices,weather))]:
+        try:call()
+        except Exception as exc:print(name+' enrichment failed: '+type(exc).__name__,flush=True)
+    return current_analysis_read()
+
+
+ANALYSIS_CACHE = None
+ANALYSIS_ERROR = None
+
+def enrichment_loop():
+    global ANALYSIS_CACHE, ANALYSIS_ERROR
+    while True:
+        ENRICHMENT_WAKE.wait(60)
+        ENRICHMENT_WAKE.clear()
+        try:
+            result=enrichment_cycle()
+            if result is not None:ANALYSIS_CACHE=result
+            ANALYSIS_ERROR=None
+        except Exception as exc:
+            ANALYSIS_ERROR=type(exc).__name__
+            print('Background enrichment failed: '+ANALYSIS_ERROR,flush=True)
 
 
 def publish_home_operation(sample, prices, weather):
@@ -1527,11 +1593,14 @@ def full_snapshot(start, end):
 
 def collector_loop():
     while True:
-        try:
-            collect_sample()
+        started=time.monotonic()
+        try:collect_sample()
         except Exception as exc:
-            print("Shadow collector error:", exc, flush=True)
-        time.sleep(int(options().get("sample_interval_seconds", 60)))
+            collector_stage('error',last_error=type(exc).__name__)
+            print('Core collector error: '+type(exc).__name__,flush=True)
+        interval=max(10,min(60,int(options().get('sample_interval_seconds',60))))
+        # Schedule start-to-start; never add a full interval after slow reads.
+        time.sleep(max(1,interval-(time.monotonic()-started)))
 
 
 def known_scan():
@@ -1703,7 +1772,7 @@ def current_analysis_read():
         age = round((now-datetime.fromisoformat(sample['created'])).total_seconds(),1)
     result = {'schema_version':1,'generated_utc':now.isoformat(),
         'sample':{key:sample.get(key) for key in sample_fields} if sample else None,
-        'sample_age_seconds':age,'sample_fresh':age is not None and -60<=age<=180,
+        'sample_age_seconds':age,'sample_fresh':age is not None and 0<=age<=120,
         'configuration_safe':{key:cfg.get(key) for key in cfg_fields},
         'energy_plan':{key:settings.get(key) for key in plan_fields},
         'note':'Aktuelt genberegnet forslag; ikke en kommando. Historik og journal hentes gennem deres sideinddelte læseværktøjer.'}
@@ -1741,25 +1810,24 @@ def current_analysis_read():
 
 
 def automatic_control_read_report():
-    report = AUTO_CONTROL.report()
-    try:
-        report['analysis'] = current_analysis_read()
-    except Exception as exc:
-        # Preserve the actual control status even when a data/model reader fails.
-        # Do not return raw URLs, credentials or arbitrary exception messages.
-        report['analysis'] = {'available':False,'error_type':type(exc).__name__,
-                              'message':'Analysegrundlaget kunne ikke læses eller beregnes.'}
-    totals = {key:len(report.get(key,[])) for key in ('events','observations')}
-    while len(json.dumps(report,ensure_ascii=False).encode('utf-8'))>900000:
-        largest = max(('events','observations'),key=lambda key:len(report.get(key,[])))
-        items = report.get(largest,[])
-        if not items:
-            report['analysis'] = {'available':False,'message':'Analysegrundlaget overskrider svargrænsen.'}
-            break
-        report[largest] = items[len(items)//2+1:]
-        report['history_truncated_for_response_limit'] = True
-        report['history_total_counts'] = totals
-        report['history_note'] = 'Resterende historik findes gennem read_history og read_operating_log.'
+    report=AUTO_CONTROL.report()
+    report['collector']=dict(COLLECTOR_STATUS)
+    with db() as conn:
+        row=conn.execute('SELECT created,soc,battery_w,grid_w,load_w,pv_w FROM samples ORDER BY id DESC LIMIT 1').fetchone()
+    report['live_sample']=dict(row) if row else None
+    report['live_sample_age_seconds']=round((datetime.now(timezone.utc)-datetime.fromisoformat(row['created'])).total_seconds(),1) if row else None
+    report['analysis']=dict(ANALYSIS_CACHE) if ANALYSIS_CACHE else {'available':False,'message':'Baggrundsanalysen er endnu ikke klar.'}
+    report['analysis']['cached']=True
+    report['analysis']['background_error_type']=ANALYSIS_ERROR
+    # Cached planning output must not pretend that old data is current.
+    if report['analysis'].get('sample',{}):
+        age=(datetime.now(timezone.utc)-datetime.fromisoformat(report['analysis']['sample']['created'])).total_seconds()
+        report['analysis']['sample_age_seconds']=round(age,1)
+        report['analysis']['sample_fresh']=0<=age<=120
+    for key in ('events','observations'):
+        if len(report.get(key,[]))>100:
+            report[key]=report[key][-100:]
+            report['history_truncated_for_response_limit']=True
     return report
 
 
@@ -2359,9 +2427,10 @@ if __name__ == "__main__":
     threading.Thread(target=CLOCK_DIAGNOSTICS.worker, daemon=True).start()
     threading.Thread(target=TEST_SUITE.worker, args=(TWENTY_TEST,), daemon=True).start()
     threading.Thread(target=collector_loop, daemon=True).start()
+    threading.Thread(target=enrichment_loop, daemon=True).start()
     threading.Thread(target=AUTO_CONTROL.worker,daemon=True).start()
     threading.Thread(target=control_alert_worker,daemon=True).start()
-    ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("DEYE_APP_PORT","8099"))), Handler).serve_forever()
 
 
 
