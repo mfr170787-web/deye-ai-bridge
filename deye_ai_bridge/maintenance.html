@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="da"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deye · Godkend kodeændring</title>
+<style>body{font:16px system-ui;background:#f2f6f8;color:#173047;max-width:940px;margin:32px auto;padding:0 20px}section{background:white;padding:24px;border-radius:16px;margin:18px 0}h1{font-size:26px}button{padding:12px 18px;border:0;border-radius:9px;background:#087b94;color:white;cursor:pointer}button:disabled{background:#8899a4;cursor:default}input{padding:12px;max-width:90%}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf3f6;padding:16px;border-radius:8px;font-size:12px}label{display:block;margin:16px 0}.status{font-weight:600}a{color:#087b94}</style>
+<h1>Godkend præcis den viste kodeændring</h1>
+<p>Chatten kan læse og foreslå. Installation kræver din lokale engangsgodkendelse her.</p>
+<section><h2>1. Vælg forslaget</h2><p>Vælg JSON-filen med kodeforslaget fra chatten. Filen læses til forhåndsvisning; ingen kode gemmes eller installeres endnu.</p>
+<input type="file" id="file" accept=".json,application/json"><p id="message" role="status"></p>
+<pre id="status">Henter status …</pre></section>
+<section><h2>2. Gennemgå ændringen</h2><pre id="preview">Vælg først en forslagspakke.</pre><pre id="diff"></pre></section>
+<section><h2>3. Godkend lokalt</h2>
+<p>Find den lokale godkendelsesnøgle i Deye AI Bridge-appens log. Indtast den kun her; send den aldrig i chatten.</p>
+<label><input id="secret" type="password" autocomplete="off" placeholder="Lokal godkendelsesnøgle"></label>
+<label><input id="ack" type="checkbox"> Jeg godkender de viste filer, backup og genstart af Bridge-processen samt automatisk tilbageførsel til den tidligere kode, hvis opstarten fejler. Automatikken skal være deaktiveret.</label>
+<button id="approve" disabled>Godkend pakken i 15 minutter</button>
+<p>Knappen installerer ikke. Når godkendelsen er gemt, kan chatten installere præcis denne pakke én gang. Ingen HA-, Pi- eller invertergenstart indgår.</p>
+<pre id="result"></pre></section>
+<script>
+let bundle=null, preview=null;
+const el=id=>document.getElementById(id);
+const base=location.pathname.replace(/\/(ui)\/?$/, '');
+async function request(path,body){const r=await fetch(base+path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw Error(d.error||'Kald afvist');return d;}
+function enable(){el('approve').disabled=!(bundle&&preview&&el('ack').checked&&el('secret').value);}
+el('file').onchange=async()=>{bundle=null;preview=null;el('ack').checked=false;el('result').textContent='';enable();try{const f=el('file').files[0];if(!f||f.size>800000)throw Error('Vælg en JSON-fil under 800 KB');const value=JSON.parse(await f.text());const p=await request('/preview',value);bundle=value;preview=p;el('preview').textContent=JSON.stringify({...p,diffs:undefined},null,2);el('diff').textContent=Object.values(p.diffs).join('\n')||'Ingen filforskelle.';el('message').textContent='Forhåndsvisning klar. Kontrollér alle forskelle.';}catch(e){el('message').textContent=e.message;}enable();};
+el('secret').oninput=enable;el('ack').onchange=enable;
+el('approve').onclick=async()=>{el('approve').disabled=true;try{const d=await request('/grant',{package:bundle,secret:el('secret').value});el('result').textContent=JSON.stringify(d,null,2);el('message').textContent='Godkendt. Chatten kan nu installere pakken med den viste SHA256.';}catch(e){el('result').textContent=e.message;}finally{el('secret').value='';el('ack').checked=false;enable();}};
+request('/status').then(d=>el('status').textContent=JSON.stringify(d,null,2)).catch(e=>el('status').textContent=e.message);
+</script></html>

@@ -25,6 +25,7 @@ button:disabled{opacity:.55;cursor:wait}#autoFeedback:not(:empty){padding:12px;b
 </style>
 </head>
 <body><main>
+<a href="api/private/maintenance/ui" style="display:block;padding:12px;text-align:right">Vedligeholdelse · gennemgå og godkend kodeændringer</a>
   <div class="head"><div><h1>Deye AI Bridge</h1><div class="muted">Home Assistant + live Modbus, sikkert og lokalt</div></div><div class="pill" id="writeMode">Shadow Mode</div></div>
   <details><summary>Tilpas dashboard</summary><div class="layout-tools"><span class="muted">Flyt bokse med ↕ eller pilene. Fold dem med knappen i overskriften.</span><button class="secondary" id="resetLayout">Gendan standardplacering</button><span id="layoutNotice" role="status" class="muted"></span></div></details>
   <section class="card" data-card-id="monthlyRegister"><h2>Elregnskab pr. måned</h2><p>Timeforbrug × gemt timepris. Gamle månedsrapporter bevares. Data fra Deye er en kontrolmåling, ikke elselskabets afregningsmåler.</p><select id="registerMonth"></select> <button onclick="downloadMonthlyRegister()">Hent Excel</button><button class="secondary" onclick="loadMonthlyRegister()">Opdatér liste</button><p id="registerStatus" class="muted">Henter register…</p><p class="muted">Afsluttede måneder arkiveres efter ét døgn, når Bridge indsamler data. Manglende timer/prisdele markeres i Excel. Indtast månedens abonnementer, gebyr og fakturabeløb i arket for at sammenligne.</p></section>
@@ -235,3 +236,4 @@ new MutationObserver(()=>{const label=document.querySelector('#flowSoc'),match=l
 async function refreshTeslaPlan(){try{const j=await call('api/shadow');renderTeslaPlan(j.tesla_shadow||{})}catch(e){document.querySelector('#teslaChargePlan').textContent='Ladeplan kunne ikke hentes: '+e.message}}
 updateHouseBattery(null);loadStatus();loadPlan();loadShadow();refreshTeslaPlan();setInterval(loadShadow,15000);setInterval(refreshTeslaPlan,60000);
 </script></body></html>
+

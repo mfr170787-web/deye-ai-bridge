@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from private_reads import read_history, read_source
 
-APP_DIR = Path("/app")
+APP_DIR = Path(os.environ.get('DEYE_APP_DIR', '/app'))
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 SNAPSHOT_FILE = DATA_DIR / "last_snapshot.json"
@@ -35,7 +35,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.26"
+APP_VERSION = "0.9.0"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -1673,6 +1673,29 @@ AUTO_CONTROL = AutomaticControl(DATA_DIR / 'automatic_control.json',read_holding
 CHARGE_TEST.observation_paused = lambda: TWENTY_TEST.busy() or AUTO_CONTROL.busy()
 
 
+def maintenance_proxy(handler, method, suffix, body=None):
+    """Fixed loopback service, never a caller-supplied hostname or URL."""
+    if suffix.split('?')[0] not in ('status', 'ui', 'logs', 'preview', 'grant', 'apply'):
+        return handler.send_json({'error': 'Ukendt vedligeholdelseskald'}, 404)
+    payload = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+    req = urllib.request.Request('http://127.0.0.1:8100/'+suffix, data=payload, method=method,
+                                 headers={'Content-Type': 'application/json'})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        response = opener.open(req, timeout=60)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        data = response.read(1000001)
+        if len(data)>1000000: raise ValueError('Svar for stort')
+        handler.send_response(response.code)
+        handler.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
+        handler.send_header('Content-Length', str(len(data)))
+        handler.send_header('Cache-Control', 'no-store')
+        handler.send_header('X-Content-Type-Options', 'nosniff')
+        handler.end_headers();handler.wfile.write(data)
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, data, status_code=200):
         payload = json.dumps(data, ensure_ascii=False).encode()
@@ -1685,6 +1708,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path == '/api/private/runtime-health':
+                return self.send_json({'ready': True, 'version': APP_VERSION})
+            if path.startswith('/api/private/maintenance/'):
+                suffix = path.removeprefix('/api/private/maintenance/')
+                if suffix not in ('status', 'ui', 'logs'):
+                    return self.send_json({'error': 'Ukendt læsekald'}, 404)
+                query = urlparse(self.path).query
+                return maintenance_proxy(self, 'GET', suffix+('?' + query if query else ''))
             if path == '/api/private/history':
                 params = urllib.parse.parse_qs(urlparse(self.path).query)
                 if set(params) - {'after_id', 'window_end'} or any(len(v)!=1 for v in params.values()):
@@ -1788,10 +1819,31 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, 500)
 
     def do_POST(self):
+        # Shared lock covers state-changing handlers. Deployment takes the
+        # exclusive lock, preventing a concurrent activation during its checks.
+        if os.environ.get('DEYE_MANAGED_RUNTIME') == '1' and not urlparse(self.path).path.startswith('/api/private/maintenance/'):
+            import fcntl
+            with Path('/data/bridge_maintenance.operation').open('r') as operation:
+                fcntl.flock(operation, fcntl.LOCK_SH)
+                try:
+                    if Path('/data/bridge_maintenance.blocked').exists():
+                        return self.send_json({'error': 'Vedligeholdelse pågår'}, 503)
+                    return self._handle_POST()
+                finally: fcntl.flock(operation, fcntl.LOCK_UN)
+        return self._handle_POST()
+
+    def _handle_POST(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if not 0 <= length <= 802048:
+                return self.send_json({'error': 'Forespørgsel for stor'}, 413)
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.startswith('/api/private/maintenance/'):
+                suffix = path.removeprefix('/api/private/maintenance/')
+                if suffix not in ('preview', 'grant', 'apply'):
+                    return self.send_json({'error': 'Ukendt handling'}, 404)
+                return maintenance_proxy(self, 'POST', suffix, body)
             if path.endswith('/api/tesla-selection'):
                 if self.headers.get('X-Deye-Control') != '1':
                     return self.send_json({'error':'Manglende styringsheader'},403)

@@ -20,7 +20,7 @@ class DispatchTests(unittest.TestCase):
     def setUp(self):
         h=next(x for x in TREE.body if isinstance(x,ast.ClassDef) and x.name=='Handler')
         self.auto=SimpleNamespace(enable=Mock(return_value={'status':'active'}),disable=Mock(return_value={'status':'verifying_restore'}),tesla_grid_mode=Mock(return_value={'status':'active'}),battery_timer=Mock(return_value={'status':'active'}))
-        ns=dict(BaseHTTPRequestHandler=BaseHTTPRequestHandler,json=json,urlparse=urlparse,AUTO_CONTROL=self.auto)
+        ns=dict(BaseHTTPRequestHandler=BaseHTTPRequestHandler,json=json,urlparse=urlparse,AUTO_CONTROL=self.auto,os=SimpleNamespace(environ={}))
         exec(compile(ast.Module(body=[h],type_ignores=[]),'handler','exec'),ns);self.cls=ns['Handler']
     def post(self,body,header=True,path='/api/automation'):
         h=object.__new__(self.cls);payload=json.dumps(body).encode();h.headers={'Content-Length':str(len(payload))}
@@ -110,3 +110,4 @@ class DischargeSettingsTests(unittest.TestCase):
             for saved,expected in [({'max_discharge_w':4500},11000),({'max_discharge_w':3000},3000),({'max_discharge_w':4500,'discharge_profile':'190A-v1'},4500)]:
                 path.write_text(json.dumps(saved))
                 self.assertEqual(ns['energy_plan']()['max_discharge_w'],expected)
+
