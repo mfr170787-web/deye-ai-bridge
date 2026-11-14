@@ -22,6 +22,8 @@ class LocalUpdates:
         self.clock = clock
         self.pages = {}
         self.tickets = {}
+        from update_flow import UpdateFlow
+        self.flow = UpdateFlow(self)
 
     def _expire(self):
         now=self.clock()
@@ -57,6 +59,7 @@ class LocalUpdates:
     def status(self):
         result=self.manager.status()
         result['approval_mode']='local_click'
+        result['update_flow']=self.flow.status()
         result['installation_blockers']=self.blockers()
         try:
             raw=(self.manager.data/'automatic_control.json').read_bytes()
@@ -133,9 +136,12 @@ class LocalUpdates:
             ticket=secrets.token_urlsafe(32)
             self.tickets[ticket]={'expires':self.clock()+900,'page':nonce,
                 'hash':result['package_sha256'],'base':result['base_revision']}
-            return {**result,'review_ticket':ticket}
+            return {**result,'review_ticket':ticket,'consequence':'Dit lokale klik godkender pause og bekræftet gendannelse, backup, installation og Bridge-genstart. Kun tidligere aktiv drift genoptages efter kontrol af pakke og nye målinger. Fejl eller afbrydelse kræver manuel kontrol. Ingen Raspberry Pi- eller Home Assistant-genstart.'}
 
     def install(self, body, nonce):
+        flow=self.flow.status()
+        if flow and flow.get("phase") not in ("complete","failed","interrupted"):
+            raise ValueError("Et opdateringsforløb er allerede i gang")
         if type(body) is not dict or set(body)!={'package','review_ticket','acknowledge'} or body['acknowledge'] is not True:
             raise ValueError('Et konkret lokalt klik på Opdater kræves')
         with self.manager.lock:
@@ -154,6 +160,9 @@ class LocalUpdates:
             return {**result,'package_sha256':proposal_id}
 
     def acknowledge_fault(self, body, nonce, reader=read_registers):
+        flow=self.flow.status()
+        if flow and flow.get("phase") not in ("complete","failed","interrupted"):
+            raise ValueError("Vent på opdateringsforløbet; manuelt stop er stadig tilgængeligt")
         if type(body) is not dict or set(body)!={'state_sha256','acknowledge'} or body['acknowledge'] is not True:
             raise ValueError('Lokal godkendelse af registerkontrol kræves')
         with self.manager.operation():

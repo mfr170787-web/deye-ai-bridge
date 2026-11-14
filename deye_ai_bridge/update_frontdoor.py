@@ -49,7 +49,7 @@ def frontdoor_handler(local, template):
             try:
                 parsed=urlparse(self.path);path=parsed.path.rstrip('/')
                 if path==PREFIX+'/submit' and not parsed.query:return self.reply(local.submit(self.body()))
-                actions={PREFIX+'/local-preview':local.preview,PREFIX+'/local-install':local.install,
+                actions={PREFIX+'/local-flow':local.flow.start,PREFIX+'/local-preview':local.preview,PREFIX+'/local-install':local.install,
                          PREFIX+'/local-fault-ack':local.acknowledge_fault}
                 if path in actions and not parsed.query:
                     # Browser nonces are private to a loaded local page; never
@@ -67,6 +67,21 @@ def frontdoor_handler(local, template):
             path=urlparse(self.path).path
             # Keep legacy pinned-core reads/approvals working without involving
             # the child. All other app requests use one fixed loopback target.
+            flow=local.flow.status()
+            if self.command=='POST' and flow and flow.get('phase') not in ('complete','failed','interrupted'):
+                # Manual stop remains available and cancels resume. Other child
+                # writes cannot race with the reviewed update transaction.
+                if path=='/api/automation':
+                    body=self.body()
+                    if body.get('action')!='disable':
+                        return self.reply({'error':'Opdatering i gang; kun manuelt stop er tilladt.'},409)
+                    local.flow.cancel_resume()
+                    data=json.dumps(body).encode()
+                    req=urllib.request.Request('http://127.0.0.1:8098/api/automation',data=data,
+                        headers={'Content-Type':'application/json','X-Deye-Control':self.headers.get('X-Deye-Control','')})
+                    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with opener.open(req,timeout=90) as response:return self.reply(json.load(response))
+                return self.reply({'error':'Opdatering i gang; vent på afsluttet kontrol.'},409)
             port=8100 if path.startswith('/api/private/maintenance/') else 8098
             suffix=self.path.removeprefix('/api/private/maintenance') if port==8100 else self.path
             length=int(self.headers.get('Content-Length','0'))
