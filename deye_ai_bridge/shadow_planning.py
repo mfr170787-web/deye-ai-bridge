@@ -203,11 +203,17 @@ def economic_dispatch(slots, plan, initial_soc):
                 'hold':'Gem batteriet til de timer, hvor det sparer mest.'}[action]
         # Reserve the planned consumption until the next scheduled refill.
         need=0.
+        checkpoint=levels[path[-1]]
         for m in range(k+1,len(horizon)):
             delta=levels[path[m+1]]-levels[path[m]]
-            if delta>1e-7:break
+            if delta>1e-7:
+                # The energy needed just BEFORE this refill is the checkpoint.
+                # The final horizon reserve may be funded by this later charge
+                # and must not be reserved again before it has been purchased.
+                checkpoint=levels[path[m]]
+                break
             need+=max(0.,-delta)
-        protected=min(upper,max(floor,levels[path[-1]])+need)/capacity*100
+        protected=min(upper,max(floor,checkpoint)+need)/capacity*100
         target=after/capacity*100
         reason+=f' Ukendt periode: økonomisk reservemål {terminal_reserve/capacity*100:.1f} % til cirka seks timers husforbrug; prisestimat {terminal_price:.3f} kr./kWh. Reserven købes kun, hvis det beregningsmæssigt kan betale sig. Estimatet er ikke en kendt fremtidig timepris.'
 
@@ -222,6 +228,40 @@ def economic_dispatch(slots, plan, initial_soc):
                      'unknown_horizon_price_estimate':round(terminal_price,4),'grid_soc_ceiling':round(grid_ceiling/capacity*100,1),
                      'reason':reason})
     return rows
+
+
+def dispatch_reserve(rows, plan, actual_soc):
+    """House reserve derived from the same feasible path used by the controller.
+
+    The current row's endpoint protects later planned house discharge. A future
+    refill funds subsequent hours; its energy is not charged to this reserve.
+    Forecast load already includes the configured safety margin.
+    """
+    capacity=float(plan['battery_capacity_kwh'])
+    eta=(float(plan['roundtrip_efficiency_percent'])/100)**.5
+    floor=float(plan['minimum_soc_morning'])
+    protected=max(floor,float(rows[0]['discharge_floor_soc']))
+    before=float(rows[0]['projected_soc'])
+    house_dc=0.
+    next_energy=None
+    for row in rows[1:]:
+        after=float(row['projected_soc'])
+        if row['action'] in ('grid_charge','solar_charge'):
+            next_energy={'time':row['time'],'kind':'grid' if row['action']=='grid_charge' else 'solar',
+                         'price_dkk_kwh':row['price_dkk_kwh']}
+            break
+        house_dc+=max(0.,before-after)*capacity/100
+        before=after
+    complete=next_energy is not None
+    return {'reserve_soc':round(protected,1),'reserve_kwh':round(protected*capacity/100,2),
+            'house_need_kwh':round(house_dc*eta,2),
+            'safety_margin_kwh':round(capacity*float(plan.get('reserve_margin_percent',15))/100,2),
+            'safety_margin_applied_in_load_forecast':True,
+            'next_energy':next_energy,'forecast_complete':complete,
+            'capacity_insufficient':protected>100,
+            'tesla_available_kwh':round(max(0.,(float(actual_soc)-protected)*capacity/100*eta),2) if complete else 0.,
+            'actual_soc':float(actual_soc),
+            'basis':'Reserve efter aktuel time fra den økonomiske plans energiforløb frem til næste planlagte genopladning. Minimums-SOC bevares; sol vægtes 70 %, og forbrugsmarginen er allerede indregnet. Husbehov er planlagt batteribidrag til senere timer, ikke hele husets forbrug.'}
 
 
 def power_limited_plan(plan, sample):
@@ -256,3 +296,4 @@ def planning_weather(weather, updated, error, now):
     except (ValueError,TypeError,AttributeError):valid=False
     if valid:return weather,{'weather_mode':'forecast','weather_notice':''}
     return {},{'weather_mode':'zero_solar','weather_notice':'Solprognosen er utilgængelig eller for gammel. Planen regner med 0 kWh sol og genberegnes fra faktisk SOC og aktuelle priser.'}
+

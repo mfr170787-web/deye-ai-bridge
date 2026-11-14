@@ -11,6 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from maintenance import Maintenance, MAX_BYTES, atomic_json
+from image_recovery import prepare_image_recovery, VERSION as IMAGE_VERSION
 
 DATA = Path('/data')
 CORE = Path('/control')
@@ -87,6 +88,17 @@ def main():
     if os.geteuid() != 0: raise SystemExit('Vedligeholdelseskernen skal starte som root')
     manager = Maintenance(DATA, Path('/app'))
     manager.recover_interrupted()
+    try:
+        image_recovery = prepare_image_recovery(manager)
+    except Exception as exc:
+        # A failed backup/preparation must not strand the previous code. The
+        # migration sends no inverter commands and never enables automation.
+        manager.recover_interrupted()
+        image_recovery = False
+        atomic_json(manager.private/('image-'+IMAGE_VERSION+'.json'), {
+            'version': IMAGE_VERSION, 'status': 'preparation_failed',
+            'reason': type(exc).__name__})
+        print('Gendannelsesopdatering kunne ikke forberedes; tidligere kode bevares: '+type(exc).__name__, flush=True)
     prepare_permissions(DATA)
     print('Lokal godkendelsesnøgle til vedligeholdelse (kun til HA-siden; del den ikke i chat): '+manager.secret, flush=True)
     server = ThreadingHTTPServer(('127.0.0.1', 8100), handler_class(manager))
@@ -121,6 +133,18 @@ def main():
 
     child = start()
     try:
+        if image_recovery:
+            success = healthy(child)
+            if not success:
+                stop(child)
+            manager.finish_restart(success)
+            atomic_json(manager.private/('image-'+IMAGE_VERSION+'.json'), {
+                **manager.read_private('image-'+IMAGE_VERSION+'.json', {}),
+                'status': 'installed' if success else 'startup_failed_rolled_back'})
+            if not success:
+                child = start()
+                if not healthy(child):
+                    raise RuntimeError('Tidligere Bridge-kode kunne ikke starte efter tilbageførsel')
         while not stopping.wait(0.25):
             if manager.restart.is_set() and time.monotonic()>=manager.restart_after:
                 with manager.lock:

@@ -91,8 +91,12 @@ class AutomaticControl:
         s['events']=s['events'][-1000:]
 
     def report(self):
-        with self.lock:
-            return {k:v for k,v in self.state().items() if k!='endpoint'}
+        # save() atomically replaces a complete JSON file. Readers see either
+        # the previous committed snapshot or the next one, never a partial write.
+        # Do not take the control lock: Modbus commands can hold it for minutes.
+        # The collector also reads this report when publishing HA status, so
+        # waiting here would stop subsequent samples and trip freshness guards.
+        return {k:v for k,v in self.state().items() if k!='endpoint'}
 
     def busy(self):
         return self.state().get('status') not in ('disabled','fault') or not self.state().get('restored',True)
@@ -411,7 +415,19 @@ class AutomaticControl:
             s=self.state()
             if reason=='manual_disable':
                 s['auto_resume']=False;s['tesla_only_active']=False;s['battery_timer_mode']=None;self.save(s)
-            if s.get('status') in ('disabled','fault') and s.get('restored',True):return self.report()
+            if s.get('status') in ('disabled','fault') and s.get('restored',True):
+                if reason=='manual_disable' and s.get('status')=='fault':
+                    if s.get('pending') is not None or s.get('endpoint')!=list(self.endpoint()):
+                        raise ValueError('Fejlen kan ikke kvitteres: uafklaret kommando eller ændret forbindelse.')
+                    # Acknowledgement is read-only towards the inverter. Keep the
+                    # original fault in the journal and require fresh baseline reads.
+                    for _ in range(3):
+                        if self.owned()!=s.get('baseline'):
+                            raise ValueError('Fejlen kan ikke kvitteres: gendannede registre afviger.')
+                    self.log(s,'restored_fault_acknowledged',previous_error=s.get('error'))
+                    s.update(status='disabled',error=None,stop_reason='manual_disable',command=None)
+                    self.save(s)
+                return self.report()
             if s.get('status')=='verifying_restore':return self.report()
             s['auto_resume']=(reason.startswith('fault: Modbus read,') and any(t in reason for t in ('TimeoutError','ConnectionError')))
             if not s['auto_resume']:s['tesla_only_active']=False;s['battery_timer_mode']=None
@@ -669,3 +685,4 @@ class DayPlans:
                 hours.append(row);t+=timedelta(hours=1)
             days.append(dict(date=date.isoformat(),hours=hours,known_hours=sum(r['known'] for r in hours)))
         return dict(created=datetime.now(timezone.utc).isoformat(),days=days,plan_created=model.get('created'))
+

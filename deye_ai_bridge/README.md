@@ -1,11 +1,18 @@
-# Deye AI Bridge 0.9.0
+# Deye AI Bridge 0.9.5
 
-Samlet adgang til målinger, journal og godkendte kodeopdateringer.
+Lokal Deye-styring og opdateringer med tydelig status.
 
-Åbn web-brugerfladen og vælg **Vedligeholdelse · gennemgå og godkend kodeændringer** for at gennemgå en konkret forslagspakke. Godkendelsessiden kræver den lokale nøgle fra appens log; del aldrig nøglen i chatten.
+## Opdatering fra den fastlåste 120-sekunders fejl
 
-Efter lokal godkendelse kan chatten installere præcis den godkendte pakke én gang inden for 15 minutter. Installation kræver deaktiveret automatik med verificeret gendannelse og genstarter kun Bridge-processen. Opstartsfejl ruller koden tilbage, når det er med i godkendelsen.
+Opdatér den eksisterende app gennem Home Assistant med backup, mens automatikken er slået fra. Installationspakken kontrollerer den kendte gamle kode og fejlstatus og læser de oprindelige inverterregistre tre gange. Kun ved bekræftet gendannelse kvitteres fejlen, med bevaret fejljournal og backup. Automatikken forbliver deaktiveret. Der sendes ingen inverterkommandoer fra gendannelsesmigrationen.
 
-Home Assistants app-version viser basisimagets version. Efter en godkendt kodeopdatering er aktiv kodeversion og fingerprint tilgængelige i vedligeholdelsesstatus; de kan afvige fra imageversionen.
+Ved afvigelser, ukendt kodegrundlag eller forbindelsesfejl vælges den tidligere kode; se appens log og vedligeholdelsesstatus. En blokeret migration gentages ikke automatisk. Efter opdateringen skal aktiv kodeversion 0.9.5, gendannelsesresultat og friske målinger kontrolleres før særskilt genaktivering.
 
-Se projektets README.md og VALIDATION.md for afgrænsning, bootstrap, backup og uafprøvede dele. Pakken er endnu ikke testet som container på anlægget.
+## Rettelser
+
+- Statusaflæsning blokerer ikke måleopsamlingen på styringens lås.
+- Deaktivér og gendan kan kvittere en allerede verificeret fejl efter tre nye registerkontroller; fejlen bevares i journalen.
+- Vedligeholdelse viser modtaget klik, manglende oplysninger, installationsblokering, opstart, bekræftet succes og fejl. Mistet svar giver statuskontrol uden ny installation.
+- Aktuel analyse, ventende kodeforslag og den korrigerede reserveberegning indgår i installationspakken.
+
+120-sekunders sikkerhedsgrænse, lokal godkendelsesnøgle og kravet om særskilt aktivering af automatisk drift bevares. Opdateringen stopper og starter kun denne Bridge-app.

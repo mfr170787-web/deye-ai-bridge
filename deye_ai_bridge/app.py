@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import hashlib
 import math
 import html
 import io
@@ -35,7 +36,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.5"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -44,7 +45,7 @@ from modbus_telemetry import ClockDiagnostics
 from modbus_telemetry import REGISTERS as TELEMETRY_REGISTERS, decode as decode_telemetry
 from energy_accounting import daily_energy
 from monthly_register import MonthlyRegister
-from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan, planning_weather
+from shadow_planning import price_window, limits, reserve, charge_schedule, economic_dispatch, power_limited_plan, planning_weather, dispatch_reserve
 
 # Field names are generic. Actual entity IDs are selected and stored on the Pi.
 TESLA_ENTITIES = dict.fromkeys((
@@ -954,8 +955,7 @@ def optimization_plan(sample, prices, weather):
     dynamic["actual_soc"] = initial_soc
     rows = economic_dispatch(slots, power_limited_plan(plan, sample), initial_soc)
     if rows:
-        dynamic['reserve_soc'] = rows[0]['reserve_soc']
-        dynamic['tesla_available_kwh'] = round(max(0, (initial_soc-dynamic['reserve_soc'])*capacity/100*eta),2) if dynamic['forecast_complete'] else 0
+        dynamic = dispatch_reserve(rows, plan, initial_soc)
     return {"status": "learning", "message": "Samlet prisplan for kendte timer; sol vægtet 70 %, husforbrug med sikkerhedsmargin.",
             "created": now.isoformat(), "hours_available": len(rows), "learning_samples": count,
             "cheap_limit": cheap, "expensive_limit": expensive, "battery_capacity_kwh": capacity,
@@ -1673,6 +1673,412 @@ AUTO_CONTROL = AutomaticControl(DATA_DIR / 'automatic_control.json',read_holding
 CHARGE_TEST.observation_paused = lambda: TWENTY_TEST.busy() or AUTO_CONTROL.busy()
 
 
+def current_analysis_read():
+    """Read the same current inputs/model used by the dashboard, without saving
+    plans, sending commands, syncing the inverter clock or updating cost ledgers.
+    Weather coordinates, tokens, HA entity IDs and notification recipients are
+    deliberately excluded. Historical measurements/logs remain separately paged.
+    """
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(DB_FILE.resolve().as_uri()+'?mode=ro', uri=True, timeout=10) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('SELECT * FROM samples ORDER BY id DESC LIMIT 1').fetchone()
+    sample = dict(row) if row else None
+    sample_fields = ('id','created','soc','battery_w','grid_w','grid_l1_w','grid_l2_w',
+        'grid_l3_w','load_w','pv_w','pv1_w','pv2_w','price_dkk','battery_charge_today',
+        'battery_discharge_today','grid_import_today','grid_export_today','load_today',
+        'pv_today','tesla_soc','tesla_connected','tesla_charger_power_kw','tesla_charging_state')
+    cfg = options()
+    cfg_fields = ('deye_port','slave_id','timeout_seconds','read_only','commissioning_enabled',
+        'price_area','sample_interval_seconds','solar_capacity_kwp','solar_tilt_degrees',
+        'solar_azimuth_degrees','solar_performance_percent')
+    settings = energy_plan()
+    plan_fields = ('target_soc','minimum_soc_morning','morning_time','evening_start',
+        'max_charge_w','max_discharge_w','max_export_w','allow_battery_sale','main_fuse_ampere',
+        'battery_capacity_kwh','roundtrip_efficiency_percent','reserve_margin_percent',
+        'tesla_target_soc','tesla_departure_time','tesla_arrival_time',
+        'tesla_battery_capacity_kwh','tesla_charge_power_kw','tesla_shadow_mode')
+    age = None
+    if sample and sample.get('created'):
+        age = round((now-datetime.fromisoformat(sample['created'])).total_seconds(),1)
+    result = {'schema_version':1,'generated_utc':now.isoformat(),
+        'sample':{key:sample.get(key) for key in sample_fields} if sample else None,
+        'sample_age_seconds':age,'sample_fresh':age is not None and -60<=age<=180,
+        'configuration_safe':{key:cfg.get(key) for key in cfg_fields},
+        'energy_plan':{key:settings.get(key) for key in plan_fields},
+        'note':'Aktuelt genberegnet forslag; ikke en kommando. Historik og journal hentes gennem deres sideinddelte læseværktøjer.'}
+    prices, weather = market_data()
+    price_fields = ('time','price_dkk_kwh','energy_price_dkk_kwh','grid_tariff_dkk_kwh','tariff_band','source')
+    bounded_prices = sorted(prices,key=lambda item:item.get('time',''))[-168:]
+    optimization = optimization_plan(sample,prices,weather)
+    result['market_and_forecast'] = {
+        'prices':[{key:item.get(key) for key in price_fields if key in item} for item in bounded_prices],
+        'price_source':CACHE.get('price_source'),'price_error_present':bool(CACHE.get('price_error')),
+        'weather_error_present':bool(CACHE.get('weather_error')),
+        'price_cache_updated_epoch':CACHE.get('price_updated'),
+        'weather_cache_updated_epoch':CACHE.get('weather_updated'),
+        'solar_forecast':solar_forecast(weather,sample.get('pv_today') if sample else None),
+        'price_basis_warning':('Reservekilden er rå spotpris; må ikke sidestilles med samlet kundepris.'
+                               if CACHE.get('price_source')=='Offentlig spotpris (reserve)' else None)}
+    result['optimization_plan'] = optimization
+    hours = optimization.get('hours',[])
+    result['known_plan_until'] = (datetime.fromisoformat(hours[-1]['time'])+timedelta(hours=1)).isoformat() if hours else None
+    result['planned_hours_count'] = len(hours)
+    # These readers do not receive a sample argument that could update a ledger.
+    result['battery_cost'] = battery_cost()
+    result['daily_energy'] = daily_accounting(prices)
+    result['tesla_shadow'] = tesla_shadow_plan(sample,prices,optimization)
+    result['clock_diagnostics'] = CLOCK_DIAGNOSTICS.report(False)
+    result['modbus_diagnostics'] = modbus_diagnostics()
+    try:
+        telemetry = json.loads(sample.get('telemetry_json') or '{}') if sample else {}
+        result['modbus_telemetry'] = {key:telemetry[key] for key in
+            ('clock','battery','remote','totals_kwh','ev','raw_registers','read_only') if key in telemetry}
+        result['modbus_telemetry']['read_error_count'] = len(telemetry.get('read_errors',[]))
+    except (TypeError,ValueError):
+        result['modbus_telemetry'] = {'available':False}
+    return result
+
+
+def automatic_control_read_report():
+    report = AUTO_CONTROL.report()
+    try:
+        report['analysis'] = current_analysis_read()
+    except Exception as exc:
+        # Preserve the actual control status even when a data/model reader fails.
+        # Do not return raw URLs, credentials or arbitrary exception messages.
+        report['analysis'] = {'available':False,'error_type':type(exc).__name__,
+                              'message':'Analysegrundlaget kunne ikke læses eller beregnes.'}
+    totals = {key:len(report.get(key,[])) for key in ('events','observations')}
+    while len(json.dumps(report,ensure_ascii=False).encode('utf-8'))>900000:
+        largest = max(('events','observations'),key=lambda key:len(report.get(key,[])))
+        items = report.get(largest,[])
+        if not items:
+            report['analysis'] = {'available':False,'message':'Analysegrundlaget overskrider svargrænsen.'}
+            break
+        report[largest] = items[len(items)//2+1:]
+        report['history_truncated_for_response_limit'] = True
+        report['history_total_counts'] = totals
+        report['history_note'] = 'Resterende historik findes gennem read_history og read_operating_log.'
+    return report
+
+
+UPDATE_PROPOSAL_LOCK = threading.RLock()
+UPDATE_PROPOSAL_TTL = 24*3600
+UPDATE_PROPOSAL_LIMIT = 5
+UPDATE_PROPOSALS_HTML = r'''<!doctype html>
+<html lang="da"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deye · Ventende opdateringer</title>
+<style>body{font:16px system-ui;background:#f3f7f9;color:#163146;max-width:960px;margin:32px auto;padding:0 20px}h1{font-size:28px}h2{font-size:20px}section{background:#fff;padding:24px;border-radius:14px;margin:18px 0}button{background:#087d93;color:#fff;border:0;border-radius:8px;padding:12px 16px;cursor:pointer}button:disabled{background:#9badb6;cursor:default}input,select{padding:12px;max-width:95%;box-sizing:border-box}select{width:100%;margin:12px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#edf3f6;padding:16px;border-radius:8px;font-size:12px}label{display:block;margin:16px 0}.muted{color:#506878}#summary{white-space:pre-wrap;line-height:1.5}.bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.notice{position:sticky;top:8px;z-index:5;border:3px solid #57717e;border-radius:12px;padding:18px;background:#fff;box-shadow:0 3px 12px #0002}.notice h2{margin:0 0 8px}.notice p{margin:8px 0}.notice.working{border-color:#087d93;background:#e5f6fc}.notice.success{border-color:#188145;background:#e8faef}.notice.error{border-color:#b22b26;background:#fff0ef}.notice.warning{border-color:#a96800;background:#fff6db}#missing{font-weight:600;color:#744700}.working h2:before{content:"◌ ";display:inline-block;animation:pulse 1s infinite}@keyframes pulse{50%{opacity:.35}}@media(prefers-reduced-motion:reduce){.working h2:before{animation:none}}</style>
+<h1>Ventende opdateringer</h1>
+<p>Chatten sender forslaget hertil. Du gennemgår ændringen og starter selv opdateringen.</p>
+<div id="update-status" class="notice" role="status" aria-live="polite" aria-atomic="true"><h2 id="status-title">Henter opdateringsstatus …</h2><p id="status-detail"></p><button id="check-status">Kontrollér status</button></div>
+<section><div class="bar"><h2>1. Vælg et forslag</h2><button id="refresh">Opdatér listen</button></div>
+<p id="runtime" class="muted">Henter installeret version …</p>
+<select id="proposals"><option value="">Ingen forslag hentet endnu</option></select>
+<p id="message" role="status"></p></section>
+<section><h2>2. Gennemgå ændringen</h2><p id="summary">Vælg et ventende forslag.</p>
+<p id="consequence" class="muted"></p><details><summary>Vis kontrolsum og kodeændringer</summary><pre id="fingerprint"></pre><pre id="diff"></pre></details></section>
+<section><h2>3. Godkend og opdater</h2>
+<p>Indtast den lokale godkendelsesnøgle fra Bridge-appens log her. Del den aldrig i chatten.</p>
+<label><input type="password" id="secret" autocomplete="off" placeholder="Lokal godkendelsesnøgle"></label>
+<label><input type="checkbox" id="ack"> Jeg godkender den viste ændring, backup og genstart af Bridge-processen samt tilbageførsel til den tidligere kode, hvis opstarten fejler. Automatikken skal være deaktiveret.</label>
+<p id="blockers" role="alert"></p><p id="missing"></p><button id="approve" disabled>Godkend og opdater</button>
+<p id="result" role="status"></p>
+<p class="muted">Upload af et forslag ændrer ikke den aktive kode. Først denne knap giver den beskyttede kerne lov til at installere. Der er ingen ekstra installationsrunde i chatten.</p></section>
+<script>
+const el=id=>document.getElementById(id);
+const base=location.pathname.replace(/\/ui\/?$/,'');
+let inspected=null,items=[],busy=false;
+async function request(path,body){const c=new AbortController();const timeout=setTimeout(()=>c.abort(),path==='/approve'?65000:15000);try{const response=await fetch(base+path,{method:body===undefined?'GET':'POST',cache:'no-store',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:c.signal});const value=await response.json();if(!response.ok){const error=Error(value.error||'Kald afvist');error.serverRejected=true;throw error;}return value;}finally{clearTimeout(timeout);}}
+function enable(){const selected=items.find(item=>item.proposal_id===el('proposals').value);el('approve').disabled=busy||!inspected||inspected.proposal_id!==el('proposals').value||!selected||selected.status!=='awaiting_approval'||!el('ack').checked||!el('secret').value;el('refresh').disabled=busy;el('proposals').disabled=busy;el('check-status').disabled=busy;prerequisites();}
+async function inspect(){inspected=null;el('ack').checked=false;el('diff').textContent='';el('fingerprint').textContent='';el('consequence').textContent='';enable();const id=el('proposals').value;if(!id){el('summary').textContent='Der er ingen ventende forslag.';return;}try{const value=await request('/proposal?id='+encodeURIComponent(id));if(el('proposals').value!==id)return;inspected=value;el('summary').textContent=value.summary;el('consequence').textContent=value.consequence;el('fingerprint').textContent='Pakke: '+value.package_sha256+'\nKodegrundlag: '+value.base_revision;el('diff').textContent=Object.values(value.diffs).join('\n')||'Ingen filforskelle.';el('message').textContent='Klar til gennemgang. Intet er installeret.';}catch(error){el('message').textContent=error.message;}enable();}
+async function load(){try{const old=el('proposals').value;const data=await request('/list');items=data.proposals;el('proposals').replaceChildren();for(const item of items){const option=document.createElement('option');option.value=item.proposal_id;const state={awaiting_approval:'Afventer godkendelse',stale:'Forældet kodegrundlag',expired:'Udløbet'}[item.status]||item.status;option.textContent=state+' · '+(item.action==='rollback'?'Tilbageførsel':item.files.join(', '))+' · '+new Date(item.submitted_at*1000).toLocaleString('da-DK');el('proposals').append(option);}if(!items.length){const option=document.createElement('option');option.value='';option.textContent='Ingen ventende opdateringer';el('proposals').append(option);}if(items.some(item=>item.proposal_id===old))el('proposals').value=old;else{const next=items.find(item=>item.status==='awaiting_approval');el('proposals').value=next?next.proposal_id:'';}if(data.invalid_entries)el('message').textContent='Et eller flere forslag kunne ikke læses. Send ikke samme forslag igen uden kontrol.';await inspect();const status=await request('/status');el('runtime').textContent='Installeret kodeversion: '+(status.app_version||'ukendt');el('blockers').textContent=(status.installation_blockers||[]).length?'Installation blokeret: '+status.installation_blockers.join(' '):'Ingen blokering fundet i automatikstatus. Alle krav kontrolleres igen ved installation.';}catch(error){el('message').textContent=error.message;}enable();}
+el('refresh').onclick=load;el('proposals').onchange=inspect;el('secret').oninput=enable;el('ack').onchange=enable;
+const pendingKey='deye-update-pending-sha';
+function remember(id){try{if(id)sessionStorage.setItem(pendingKey,id);else sessionStorage.removeItem(pendingKey);}catch{}}
+function remembered(){try{return sessionStorage.getItem(pendingKey)||'';}catch{return '';}}
+function notice(kind,title,detail=''){
+ const panel=el('update-status');panel.className='notice '+kind;
+ panel.setAttribute('aria-busy',kind==='working'?'true':'false');
+ el('status-title').textContent=title;el('status-detail').textContent=detail;
+}
+function prerequisites(){
+ if(busy)return;
+ const missing=[];
+ if(!inspected)missing.push('Vælg og gennemgå et aktuelt forslag');
+ if(!el('secret').value)missing.push('Indtast lokal godkendelsesnøgle');
+ if(!el('ack').checked)missing.push('Sæt flueben ved godkendelsen');
+ el('missing').textContent=missing.length?'Mangler: '+missing.join(' · '):'Alle lokale felter er udfyldt. Bridge kontrollerer også nøgle og deaktiveret automatik ved dit klik.';
+}
+function operationView(state,id){
+ const op=state.operation||{};
+ if(op.package_sha256!==id)return 'waiting';
+ const short=id.slice(0,12);
+ if(op.status==='installed'&&state.active_release===id){
+  notice('success','Opdateringen er installeret og bekræftet',
+    'Bridge er startet korrekt. Pakke '+short+' · Backup: '+(op.backup||'ukendt')+' · Kontrolleret '+new Date().toLocaleTimeString('da-DK'));
+  remember('');return 'installed';
+ }
+ if((op.status||'').includes('rolled_back')){
+  notice('error','Opdateringen fejlede – tidligere kode er valgt igen',
+    'Pakke '+short+'. Genaktivering af automatikken kræver kontrol. Fejlstatus: '+op.status);
+  remember('');return 'failed';
+ }
+ if(op.status==='restart_pending'||op.status==='starting'){
+  notice('working','Installationen er registreret – venter på opstart',
+    'Den præcise pakke '+short+' er accepteret. Backup: '+(op.backup||'afventer')+'. Luk ikke siden, og tryk ikke igen.');
+  return 'working';
+ }
+ notice('warning','Installationsstatus kræver kontrol','Pakke '+short+' · Status: '+(op.status||'ukendt')+'. Tryk ikke igen.');
+ return 'unknown';
+}
+async function follow(id){
+ for(let i=0;i<60;i++){
+  try{
+   const state=await request('/status');
+   el('runtime').textContent='Installeret kodeversion: '+(state.app_version||'ukendt');
+   const phase=operationView(state,id);
+   if(phase==='installed')return 'Opdateringen er installeret og bekræftet.';
+   if(phase==='failed')return 'Opdateringen fejlede; tidligere kode er valgt igen.';
+  }catch{
+   notice('warning','Forbindelsen er midlertidigt væk – resultat ikke bekræftet',
+     'Det kan ske under genstart. Siden kontrollerer igen automatisk. Tryk ikke Opdater igen.');
+  }
+  await new Promise(resolve=>setTimeout(resolve,2000));
+ }
+ notice('warning','Resultatet er ikke bekræftet endnu',
+   'Tryk Kontrollér status eller genåbn siden. Den samme installation sendes ikke igen.');
+ return 'Afventer bekræftet installationsstatus.';
+}
+async function monitor(id){
+ busy=true;enable();try{el('result').textContent=await follow(id);}finally{busy=false;enable();}
+}
+el('check-status').onclick=async()=>{
+ const id=remembered();
+ if(id)return monitor(id);
+ try{const state=await request('/status');const op=state.operation||{};
+  if(op.package_sha256)operationView(state,op.package_sha256);
+  else notice('info','Ingen installation er registreret','Vælg et forslag nedenfor.');
+ }catch(error){notice('error','Status kunne ikke læses',error.message);}
+};
+el('approve').onclick=async()=>{
+ if(busy||!inspected||el('approve').disabled){prerequisites();return;}
+ const viewed=inspected;busy=true;enable();remember(viewed.proposal_id);
+ notice('working','Dit klik er modtaget – kontrollerer godkendelsen',
+   'Bridge kontrollerer nøgle, kodegrundlag og sikker driftstilstand. Installation er endnu ikke bekræftet.');
+ el('update-status').scrollIntoView({behavior:'smooth',block:'start'});
+ el('approve').textContent='Behandler godkendelse …';
+ const body={proposal_id:viewed.proposal_id,reviewed_sha256:viewed.package_sha256,
+  reviewed_base_revision:viewed.base_revision,secret:el('secret').value,
+  acknowledge_restart_and_rollback:el('ack').checked};
+ el('secret').value='';
+ try{
+  await request('/approve',body);
+  notice('working','Opdateringen er accepteret – venter på bekræftet opstart',
+    'Backup og installation er startet. Siden kontrollerer den præcise pakke.');
+  el('approve').textContent='Kontrollerer installation …';
+  el('result').textContent=await follow(viewed.proposal_id);
+  inspected=null;await load();
+ }catch(error){
+  if(error.serverRejected){remember('');notice('error','Godkendelsen blev afvist – opdateringen er ikke startet',error.message);}
+  else{
+   notice('warning','Svaret mangler – installationen kan være startet',
+     'Der sendes ikke et nyt installationskald. Kontrollerer status for samme pakke …');
+   el('result').textContent=await follow(viewed.proposal_id);
+  }
+ }finally{body.secret='';el('secret').value='';el('ack').checked=false;busy=false;el('approve').textContent='Godkend og opdater';enable();}
+};
+async function initialize(){
+ await load();
+ const id=remembered();
+ if(id){notice('working','Genoptager kontrol af den registrerede opdatering','Siden sender ikke installationen igen.');await monitor(id);}
+ else {try{const state=await request('/status');const op=state.operation||{};if(op.package_sha256)operationView(state,op.package_sha256);else notice('info','Ingen installation er registreret','Se manglende oplysninger nedenfor.');}catch(error){notice('error','Status kunne ikke læses',error.message);}}
+}
+initialize();
+
+</script></html>'''
+
+
+def update_status_view():
+    result = _update_core('status')
+    state = AUTO_CONTROL.state()
+    blockers = []
+    if state.get('status') != 'disabled':
+        blockers.append('Automatikstatus er '+str(state.get('status','ukendt'))+'; kræver deaktiveret drift.')
+    if state.get('restored') is not True:
+        blockers.append('Gendannelsen er endnu ikke bekræftet.')
+    if state.get('error'):
+        blockers.append('En fejlstatus er stadig registreret: '+str(state['error']))
+    if state.get('pending') is not None:
+        blockers.append('En inverterkommando afventer afklaring.')
+    if state.get('auto_resume') or state.get('tesla_only_active'):
+        blockers.append('Automatisk genoptagelse eller bilstyring er stadig aktiv.')
+    result['installation_blockers'] = blockers
+    result['readiness_note'] = 'Den beskyttede kerne kontrollerer alle krav igen ved installation.'
+    return result
+
+
+def _update_bytes(value):
+    return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
+
+
+def _update_core(path, body=None):
+    if path not in ('status','preview','grant','apply'):
+        raise ValueError('Ukendt vedligeholdelseskald')
+    request=urllib.request.Request('http://127.0.0.1:8100/'+path,
+        data=_update_bytes(body) if body is not None else None,
+        method='POST' if body is not None else 'GET',headers={'Content-Type':'application/json'})
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        response=opener.open(request,timeout=60)
+    except urllib.error.HTTPError as exc:
+        response=exc
+    with response:
+        payload=response.read(1000001)
+        if len(payload)>1000000:raise ValueError('Svar for stort')
+        value=json.loads(payload)
+        if response.code>=400:raise ValueError(value.get('error','Vedligeholdelseskald afvist'))
+        return value
+
+
+def _proposal_directory(create=False):
+    directory=DATA_DIR/'bridge_update_proposals'
+    if directory.is_symlink():raise ValueError('Ugyldigt venteområde')
+    if create:
+        directory.mkdir(mode=0o700,exist_ok=True)
+        directory.chmod(0o700)
+    return directory
+
+
+def _proposal_read(proposal_id,allow_expired=False):
+    if not isinstance(proposal_id,str) or not re.fullmatch('[0-9a-f]{64}',proposal_id):
+        raise ValueError('Ugyldigt forslags-id')
+    path=_proposal_directory()/ (proposal_id+'.json')
+    if path.is_symlink():raise ValueError('Ugyldig forslagsfil')
+    with path.open('rb') as stream:payload=stream.read(808001)
+    if len(payload)>808000:raise ValueError('Forslagsfilen er for stor')
+    entry=json.loads(payload)
+    if type(entry) is not dict or set(entry)!={'package','summary','submitted_at'}:
+        raise ValueError('Ugyldigt forslagsformat')
+    if not isinstance(entry['summary'],str) or len(entry['summary'].encode('utf-8'))>2000:
+        raise ValueError('Ugyldig beskrivelse')
+    if hashlib.sha256(_update_bytes(entry['package'])).hexdigest()!=proposal_id:
+        raise ValueError('Forslagets indhold matcher ikke kontrolsummen')
+    submitted=entry['submitted_at']
+    if type(submitted) not in (int,float) or not math.isfinite(submitted) or submitted>time.time()+60:
+        raise ValueError('Ugyldigt tidspunkt')
+    if not allow_expired and time.time()-submitted>UPDATE_PROPOSAL_TTL:
+        raise ValueError('Forslaget er udløbet; send et nyt forslag')
+    return entry
+
+
+def list_update_proposals():
+    with UPDATE_PROPOSAL_LOCK:
+        directory=_proposal_directory()
+        revision=_update_core('status')['revision']
+        proposals=[];invalid=0
+        for path in sorted(directory.glob('*.json')) if directory.exists() else []:
+            try:
+                entry=_proposal_read(path.stem,allow_expired=True)
+                package=entry['package']
+                expired=time.time()-entry['submitted_at']>UPDATE_PROPOSAL_TTL
+                proposals.append({'proposal_id':path.stem,'files':list(package['files']),'summary':entry['summary'],
+                    'action':package['action'],'submitted_at':entry['submitted_at'],
+                    'status':'expired' if expired else 'stale' if package['base_revision']!=revision else 'awaiting_approval',
+                    'restart':package['restart'],'rollback_on_failure':package['rollback_on_failure']})
+            except (ValueError,OSError,KeyError,TypeError):invalid+=1
+        proposals.sort(key=lambda item:item['submitted_at'],reverse=True)
+        return {'proposals':proposals,'invalid_entries':invalid,'max_pending':UPDATE_PROPOSAL_LIMIT}
+
+
+def submit_update_proposal(body):
+    """Write ONLY a bounded proposal, never active code, grants or commands."""
+    if type(body) is not dict or set(body)!={'package','summary'}:
+        raise ValueError('Forslaget kræver pakke og beskrivelse')
+    package=body['package'];summary=body['summary']
+    if not isinstance(summary,str) or not summary.strip() or len(summary.encode('utf-8'))>2000:
+        raise ValueError('Beskrivelsen skal være mellem 1 og 2000 bytes')
+    if len(_update_bytes(package))>800000:raise ValueError('Forslaget er for stort')
+    preview=_update_core('preview',package)
+    proposal_id=hashlib.sha256(_update_bytes(package)).hexdigest()
+    if preview.get('package_sha256')!=proposal_id:raise ValueError('Kontrolsum afviger fra kernen')
+    with UPDATE_PROPOSAL_LOCK:
+        directory=_proposal_directory(create=True)
+        # Housekeeping is confined to this staging directory and this write call.
+        for path in directory.glob('*.json'):
+            try:
+                entry=_proposal_read(path.stem,allow_expired=True)
+                if time.time()-entry['submitted_at']>UPDATE_PROPOSAL_TTL:path.unlink()
+            except (ValueError,OSError,KeyError,TypeError):
+                continue
+        target=directory/(proposal_id+'.json')
+        if target.exists():
+            _proposal_read(proposal_id)
+        else:
+            if len(list(directory.glob('*.json')))>=UPDATE_PROPOSAL_LIMIT:
+                raise ValueError('Venteområdet er fuldt; der kan højst ligge fem forslag')
+            temporary=directory/(proposal_id+'.tmp-'+os.urandom(6).hex())
+            try:
+                fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+                with os.fdopen(fd,'wb') as stream:
+                    stream.write(_update_bytes({'package':package,'summary':summary,'submitted_at':time.time()}))
+                    stream.flush();os.fsync(stream.fileno())
+                os.replace(temporary,target)
+            finally:
+                if temporary.exists():temporary.unlink()
+        return {'status':'awaiting_local_approval','proposal_id':proposal_id,
+                'files':list(package['files']),'installed':False,'restart_performed':False,
+                'note':'Forslaget ligger i venteområdet. Åbn Vedligeholdelse i HA og gennemgå det før Godkend og opdater.'}
+
+
+def inspect_update_proposal(proposal_id):
+    with UPDATE_PROPOSAL_LOCK:
+        entry=_proposal_read(proposal_id)
+        preview=_update_core('preview',entry['package'])
+        if preview['package_sha256']!=proposal_id:raise ValueError('Kontrolsum afviger')
+        return dict(preview,proposal_id=proposal_id,submitted_at=entry['submitted_at'],summary=entry['summary'])
+
+
+def approve_update_proposal(body):
+    """HA user action: review hash + local secret -> grant -> apply exactly once."""
+    if type(body) is not dict or set(body)!={'proposal_id','reviewed_sha256','reviewed_base_revision','secret','acknowledge_restart_and_rollback'}:
+        raise ValueError('Ugyldig godkendelse')
+    if body['acknowledge_restart_and_rollback'] is not True:
+        raise ValueError('Backup, procesgenstart og tilbageførsel skal godkendes')
+    if not isinstance(body['secret'],str) or not 0<len(body['secret'])<=256:
+        raise ValueError('Lokal godkendelsesnøgle kræves')
+    proposal_id=body['proposal_id']
+    with UPDATE_PROPOSAL_LOCK:
+        entry=_proposal_read(proposal_id)
+        package=entry['package']
+        if body['reviewed_sha256']!=proposal_id or body['reviewed_base_revision']!=package['base_revision']:
+            raise ValueError('Gennemgå det præcise forslag igen før godkendelse')
+        preview=_update_core('preview',package)
+        if preview['package_sha256']!=proposal_id:raise ValueError('Forslaget er ændret')
+        # The pinned core independently checks the secret, current base, inactive
+        # automation and exact package. This application cannot issue its own grant.
+        grant=_update_core('grant',{'package':package,'secret':body['secret']})
+        if grant.get('approved_sha256')!=proposal_id:raise ValueError('Godkendelsen matcher ikke forslaget')
+        try:
+            result=_update_core('apply',package)
+        except Exception:
+            # A response can be lost while the child process is being restarted.
+            # Never retry blindly; confirm this exact operation instead.
+            state=_update_core('status')
+            operation=state.get('operation') or {}
+            if state.get('active_release')==proposal_id and operation.get('package_sha256')==proposal_id and operation.get('status') in ('restart_pending','starting','installed'):
+                result={'status':operation['status'],'operation_id':operation['id'],'response_recovered':True}
+            else:raise
+        try:(_proposal_directory()/(proposal_id+'.json')).unlink()
+        except OSError:result['proposal_cleanup_pending']=True
+        return dict(result,proposal_id=proposal_id)
+
+
+def update_proposals_ui():
+    return UPDATE_PROPOSALS_HTML.encode('utf-8')
+
+
 def maintenance_proxy(handler, method, suffix, body=None):
     """Fixed loopback service, never a caller-supplied hostname or URL."""
     if suffix.split('?')[0] not in ('status', 'ui', 'logs', 'preview', 'grant', 'apply'):
@@ -1710,11 +2116,35 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path.rstrip("/")
             if path == '/api/private/runtime-health':
                 return self.send_json({'ready': True, 'version': APP_VERSION})
+            if path.startswith('/api/private/updates/'):
+                suffix=path.removeprefix('/api/private/updates/')
+                if suffix=='list':return self.send_json(list_update_proposals())
+                if suffix=='status':return self.send_json(update_status_view())
+                if suffix=='proposal':
+                    params=urllib.parse.parse_qs(urlparse(self.path).query,keep_blank_values=True)
+                    if set(params)!={'id'} or len(params['id'])!=1:
+                        return self.send_json({'error':'Ugyldigt forslags-id'},400)
+                    return self.send_json(inspect_update_proposal(params['id'][0]))
+                if suffix=='ui':
+                    payload=update_proposals_ui()
+                    self.send_response(200)
+                    self.send_header('Content-Type','text/html; charset=utf-8')
+                    self.send_header('Content-Length',str(len(payload)))
+                    self.send_header('Cache-Control','no-store')
+                    self.send_header('X-Content-Type-Options','nosniff')
+                    self.end_headers();self.wfile.write(payload);return
+                return self.send_json({'error':'Ukendt læsekald'},404)
             if path.startswith('/api/private/maintenance/'):
                 suffix = path.removeprefix('/api/private/maintenance/')
                 if suffix not in ('status', 'ui', 'logs'):
                     return self.send_json({'error': 'Ukendt læsekald'}, 404)
+                if suffix=='ui' and urlparse(self.path).query!='legacy=1':
+                    self.send_response(302)
+                    self.send_header('Location','../updates/ui')
+                    self.send_header('Cache-Control','no-store')
+                    self.end_headers();return
                 query = urlparse(self.path).query
+                if suffix=='ui':query=''
                 return maintenance_proxy(self, 'GET', suffix+('?' + query if query else ''))
             if path == '/api/private/history':
                 params = urllib.parse.parse_qs(urlparse(self.path).query)
@@ -1746,7 +2176,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Cache-Control','no-store')
                 self.end_headers();self.wfile.write(payload);return
             if path.endswith('/api/automation'):
-                return self.send_json(AUTO_CONTROL.report())
+                return self.send_json(automatic_control_read_report())
             if path.endswith('/api/legacy-tests'):
                 return self.send_json(legacy_tests())
             if path.endswith('/api/charge20/report'):
@@ -1821,7 +2251,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         # Shared lock covers state-changing handlers. Deployment takes the
         # exclusive lock, preventing a concurrent activation during its checks.
-        if os.environ.get('DEYE_MANAGED_RUNTIME') == '1' and not urlparse(self.path).path.startswith('/api/private/maintenance/'):
+        if os.environ.get('DEYE_MANAGED_RUNTIME') == '1' and not urlparse(self.path).path.startswith(('/api/private/maintenance/','/api/private/updates/')):
             import fcntl
             with Path('/data/bridge_maintenance.operation').open('r') as operation:
                 fcntl.flock(operation, fcntl.LOCK_SH)
@@ -1839,6 +2269,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({'error': 'Forespørgsel for stor'}, 413)
             body = json.loads(self.rfile.read(length) or b"{}")
             path = urlparse(self.path).path.rstrip("/")
+            if path.startswith('/api/private/updates/'):
+                suffix=path.removeprefix('/api/private/updates/')
+                if suffix=='submit':return self.send_json(submit_update_proposal(body))
+                if suffix=='approve':return self.send_json(approve_update_proposal(body))
+                return self.send_json({'error':'Ukendt forslagshandling'},404)
             if path.startswith('/api/private/maintenance/'):
                 suffix = path.removeprefix('/api/private/maintenance/')
                 if suffix not in ('preview', 'grant', 'apply'):
@@ -1927,4 +2362,6 @@ if __name__ == "__main__":
     threading.Thread(target=AUTO_CONTROL.worker,daemon=True).start()
     threading.Thread(target=control_alert_worker,daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
+
+
 
