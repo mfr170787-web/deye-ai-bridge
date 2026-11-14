@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+from private_reads import read_history, read_source
 
 APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
@@ -34,7 +35,7 @@ CACHE = {
     "prices": None, "weather": None, "price_updated": 0, "weather_updated": 0,
     "price_source": None, "price_error": None, "weather_error": None,
 }
-APP_VERSION = "0.8.25"
+APP_VERSION = "0.8.26"
 from automatic_control import AutomaticControl, DayPlans, valid_write as valid_auto_write
 from charge_test import ChargeTest
 from test_suite import TestSuite
@@ -1684,6 +1685,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             path = urlparse(self.path).path.rstrip("/")
+            if path == '/api/private/history':
+                params = urllib.parse.parse_qs(urlparse(self.path).query)
+                if set(params) - {'after_id', 'window_end'} or any(len(v)!=1 for v in params.values()):
+                    return self.send_json({'error': 'Ugyldige parametre'}, 400)
+                return self.send_json(read_history(DB_FILE, int(params.get('after_id', ['0'])[0]),
+                                                  params.get('window_end', [None])[0]))
+            if path == '/api/private/source':
+                params = urllib.parse.parse_qs(urlparse(self.path).query)
+                if set(params) - {'name'} or any(len(v)!=1 for v in params.values()):
+                    return self.send_json({'error': 'Ugyldige parametre'}, 400)
+                return self.send_json(read_source(APP_DIR, params.get('name', [None])[0]))
             if path.endswith('/api/tesla-selection'):
                 return self.send_json(tesla_devices())
             if path.endswith('/api/battery-cost'):
@@ -1863,3 +1875,4 @@ if __name__ == "__main__":
     threading.Thread(target=AUTO_CONTROL.worker,daemon=True).start()
     threading.Thread(target=control_alert_worker,daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", 8099), Handler).serve_forever()
+

@@ -1,6 +1,6 @@
 name: "Deye AI Bridge"
 description: "Sikker bro mellem Home Assistant, Deye Modbus og en kommende AI-agent"
-version: "0.8.25"
+version: "0.8.26"
 slug: "deye_ai_bridge"
 init: false
 arch:
@@ -38,3 +38,4 @@ schema:
   solar_tilt_degrees: int(0,90)
   solar_azimuth_degrees: int(-180,180)
   solar_performance_percent: int(50,100)
+
