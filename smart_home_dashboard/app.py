@@ -12,7 +12,7 @@ APP_DIR = Path("/app")
 DATA_DIR = Path("/data")
 OPTIONS_FILE = DATA_DIR / "options.json"
 LAYOUT_FILE = DATA_DIR / "dashboard.json"
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 
 
 def options():
@@ -175,8 +175,12 @@ def deye_data():
     errors = []
     for base in dict.fromkeys(candidates):
         try:
-            return {"connected": True, "source": base,
-                    "data": request_json(base + "/api/shadow", timeout=6)}
+            data = request_json(base + "/api/shadow", timeout=6)
+            try:
+                data["victron"] = request_json(base + "/api/victron", timeout=3)
+            except Exception:
+                data["victron"] = None
+            return {"connected": True, "source": base, "data": data}
         except Exception as exc:
             errors.append("%s: %s" % (base, exc))
     return {"connected": False, "error": " | ".join(errors), "data": None}
